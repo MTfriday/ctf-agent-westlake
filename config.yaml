@@ -1,0 +1,73 @@
+# CTF Agent — 主配置文件
+# 可被 .env 环境变量覆盖
+
+# ========== 比赛平台 API ==========
+platform:
+  # 平台类型: "generic" | "ctfd"
+  type: "generic"
+
+  # 通用 API 配置（type=generic 时生效）
+  api_base_url: ""                          # 赛事平台API基础URL
+  auth_type: "Bearer"                       # "Bearer" | "ApiKey" | "Header"
+  auth_credential: "ctf2_58b12ab4bcd2ad18030022370dbc217c759ecab8c7ee13ef3bb76d6a542271ca"                       # 认证凭证（或通过环境变量 TEAM_TOKEN）
+  endpoints:
+    list_challenges: "/api/challenges"       # 获取题目列表
+    get_challenge: "/api/challenge"          # 获取单题详情（支持 ?id=xxx）
+    download_attachment: "/api/attachment"   # 下载附件（支持 ?id=xxx）
+    submit_flag: "/api/flag"                 # 提交Flag
+
+# ========== LLM 配置 ==========
+llm:
+  # OpenAI 兼容接口（阿里百炼使用此模式）
+  bailian:
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # API Key 通过环境变量 BAILIAN_API_KEY 设置
+    default_model: "qwen-max"
+
+  # 其他 LLM 提供商通过 .env 配置
+
+# ========== 求解器配置 ==========
+solver:
+  max_concurrent_challenges: 10              # 最大并发解题数
+  max_attempts_per_challenge: 3              # 每题最多尝试次数
+  model_temperature: 0.7                     # 模型温度
+  retry_delay_seconds: 30                    # 重试间隔
+
+# ========== Flag 配置 ==========
+flag:
+  # Flag 校验正则（可为空以禁用校验）
+  pattern: ""
+  # 默认模式（启用时使用）: "[A-Za-z0-9_{}!@#$%^&*()\\-+]+"
+  min_length: 1
+
+# ========== 速率限制 ==========
+rate_limit:
+  enabled: true
+  requests_per_second: 5                     # 每秒最大请求数
+  burst_size: 10                             # 突发允许量
+
+# ========== 沙箱配置 ==========
+sandbox:
+  image: "ctf-sandbox"
+  memory_limit: "16g"
+  cpu_limit: 2                               # CPU 核心数
+  # 危险命令黑名单（正则匹配）
+  dangerous_commands:
+    - "^rm\\s+-rf\\s+/\\s*$"                 # rm -rf /
+    - "^mkfs\\."                             # 格式化文件系统
+    - "^dd\\s+if=/dev/zero"                  # 覆写磁盘
+    - "^fdisk\\s"                            # 分区操作
+    - "^:(){ :\\|:& };:"                     # Fork 炸弹
+  # 网络白名单（空 = 仅允许题目环境）
+  network_whitelist: []
+
+# ========== 仪表盘 ==========
+dashboard:
+  enabled: true
+  port: 8501
+  refresh_interval_seconds: 3
+
+# ========== 日志 ==========
+logging:
+  level: "INFO"                              # DEBUG | INFO | WARNING | ERROR
+  trace_enabled: true

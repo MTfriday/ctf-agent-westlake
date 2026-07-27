@@ -14,9 +14,12 @@ from typing import Any
 
 import aiodocker
 
+from backend.sandbox_security import check_dangerous_command
+
 logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "ctf-agent"
+
 
 # Concurrency control
 _start_semaphore: asyncio.Semaphore | None = None
@@ -151,6 +154,12 @@ class DockerSandbox:
     async def exec(self, command: str, timeout_s: int = 300) -> ExecResult:
         if not self._container:
             raise RuntimeError("Sandbox not started")
+
+        # Dangerous command check
+        warning = check_dangerous_command(command)
+        if warning:
+            logger.warning("Blocked dangerous command: %.100s", command)
+            return ExecResult(exit_code=-1, stdout="", stderr=warning)
 
         async with self._lock:
             try:

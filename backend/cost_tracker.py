@@ -17,6 +17,7 @@ PROVIDER_MAP: dict[str, str] = {
     "claude-sdk": "anthropic",
     "azure": "openai",
     "zen": "openai",
+    "bailian": "openai",
     "codex": "openai",
     "google": "google",
 }
@@ -57,6 +58,22 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
         "input": 0.15,
         "cached_input": 0.02,
         "output": 0.60,
+    },
+    # 阿里百炼通义千问系列定价
+    "qwen-max": {
+        "input": 2.00,
+        "cached_input": 0.20,
+        "output": 10.00,
+    },
+    "qwen-plus": {
+        "input": 0.50,
+        "cached_input": 0.05,
+        "output": 2.00,
+    },
+    "qwen-turbo": {
+        "input": 0.30,
+        "cached_input": 0.03,
+        "output": 1.00,
     },
 }
 

@@ -33,6 +33,7 @@ class SolverDeps:
     submit_fn: SubmitFn | None = None  # Deduped flag submission via swarm
     no_submit: bool = False
     notify_coordinator: Callable[[str], Coroutine[Any, Any, None]] | None = None
+    flag_pattern: str = ""  # Optional regex for flag validation
 
 
 @dataclass
