@@ -17,6 +17,7 @@ PROVIDER_MAP: dict[str, str] = {
     "claude-sdk": "anthropic",
     "azure": "openai",
     "zen": "openai",
+    "deepseek": "openai",
     "bailian": "openai",
     "codex": "openai",
     "google": "google",
@@ -58,6 +59,17 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
         "input": 0.15,
         "cached_input": 0.02,
         "output": 0.60,
+    },
+    # DeepSeek 系列定价
+    "deepseek-chat": {
+        "input": 0.27,
+        "cached_input": 0.027,
+        "output": 1.10,
+    },
+    "deepseek-reasoner": {
+        "input": 0.55,
+        "cached_input": 0.055,
+        "output": 2.19,
     },
     # 阿里百炼通义千问系列定价
     "qwen-max": {

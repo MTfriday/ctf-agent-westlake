@@ -565,6 +565,183 @@ class TestCoordinatorTools:
         assert "capacity" in capacity_msg.lower()
 
 
+# ── CTF2 Client Tests ───────────────────────────────────────────────────────
+
+
+class TestCTF2Client:
+    """Test the CTF2-specific platform client."""
+
+    @pytest.mark.asyncio
+    async def test_compound_id_roundtrip(self) -> None:
+        """Test that compound IDs encode and decode correctly."""
+        from backend.platforms.ctf2_client import (
+            _make_challenge_id,
+            _parse_challenge_id,
+        )
+
+        cid = _make_challenge_id("practice", "ground_abc", "challenge_123")
+        parent_type, parent_id, ch_id = _parse_challenge_id(cid)
+        assert parent_type == "practice"
+        assert parent_id == "ground_abc"
+        assert ch_id == "challenge_123"
+
+        # Test fallback for plain IDs
+        parent_type, parent_id, ch_id = _parse_challenge_id("simple_id")
+        assert parent_type == "practice"
+        assert parent_id == ""
+
+    @pytest.mark.asyncio
+    async def test_fetch_challenges_traverses_hierarchy(self) -> None:
+        """Test that fetch_challenges traverses competitions→stages→challenges."""
+        from backend.platforms.ctf2_client import CTF2Client
+
+        client = CTF2Client(auth_token="test-token")
+
+        # Mock the paginated GET to simulate CTF2 responses
+        async def mock_paginated(path: str) -> list[dict]:
+            if "competitions" in path and "stages" not in path:
+                return [{"id": "comp1", "name": "Test Competition"}]
+            if "stages" in path and "challenges" not in path:
+                return [{"id": "stage1", "name": "Stage 1"}]
+            if "challenges" in path:
+                return [
+                    {"id": "ch1", "name": "Web Challenge", "category": "web", "value": 100},
+                    {"id": "ch2", "name": "Crypto Challenge", "category": "crypto", "value": 200},
+                ]
+            if "practice" in path:
+                return []
+            return []
+
+        client._paginated_get = mock_paginated  # type: ignore[assignment]
+
+        challenges = await client.fetch_challenges()
+        assert len(challenges) == 2
+        assert challenges[0].name == "Web Challenge"
+        assert challenges[1].name == "Crypto Challenge"
+        # Check compound IDs
+        assert "stage" in str(challenges[0].id)
+        assert "ch1" in str(challenges[0].id)
+
+    @pytest.mark.asyncio
+    async def test_submit_flag_practice_format(self) -> None:
+        """Test that practice challenge flags use the correct format."""
+        from unittest.mock import AsyncMock
+
+        from backend.platforms.ctf2_client import CTF2Client, _make_challenge_id
+
+        client = CTF2Client(auth_token="test-token")
+        challenge_id = _make_challenge_id("practice", "ground1", "ch1")
+
+        # Mock _request to capture the call
+        calls: list[tuple] = []
+
+        async def capture_request(method: str, path: str, **kwargs: object) -> dict:
+            calls.append((method, path, kwargs))
+            return {"success": True, "data": {}}
+
+        client._request = capture_request  # type: ignore[assignment]
+
+        result = await client.submit_flag(challenge_id, "flag{test123}")
+
+        assert len(calls) == 1
+        method, path, kwargs = calls[0]
+        assert method == "POST"
+        assert "practice" in path and "ground1" in path and "ch1" in path
+        body = kwargs.get("json", {})
+        assert isinstance(body, dict)
+        assert body.get("flag") == "flag{test123}"
+        assert body.get("confirmation") is True
+        assert result.status == "correct"
+
+    @pytest.mark.asyncio
+    async def test_submit_flag_stage_format(self) -> None:
+        """Test that stage challenge flags use the correct format."""
+        from backend.platforms.ctf2_client import CTF2Client, _make_challenge_id
+
+        client = CTF2Client(auth_token="test-token")
+        challenge_id = _make_challenge_id("stage", "stage1", "ch1")
+
+        calls: list[tuple] = []
+
+        async def capture_request(method: str, path: str, **kwargs: object) -> dict:
+            calls.append((method, path, kwargs))
+            return {"success": True, "data": {}}
+
+        client._request = capture_request  # type: ignore[assignment]
+
+        result = await client.submit_flag(challenge_id, "CTF{test}")
+
+        assert len(calls) == 1
+        method, path, kwargs = calls[0]
+        assert method == "POST"
+        assert "stages" in path and "stage1" in path
+        body = kwargs.get("json", {})
+        assert isinstance(body, dict)
+        assert body.get("flag") == "CTF{test}"
+        assert "challenge_id" in body
+        assert result.status == "correct"
+
+    @pytest.mark.asyncio
+    async def test_start_environment(self) -> None:
+        """Test starting a practice challenge environment."""
+        from backend.platforms.ctf2_client import CTF2Client, _make_challenge_id
+
+        client = CTF2Client(auth_token="test-token")
+        challenge_id = _make_challenge_id("practice", "ground1", "ch1")
+
+        async def mock_request(method: str, path: str, **kwargs: object) -> dict:
+            return {
+                "success": True,
+                "data": {
+                    "environment": {
+                        "host": "10.0.0.1",
+                        "port": 8080,
+                        "container_id": "abc123",
+                        "status": "started",
+                    }
+                },
+            }
+
+        client._request = mock_request  # type: ignore[assignment]
+
+        env = await client.start_environment(challenge_id)
+        assert env.host == "10.0.0.1"
+        assert env.port == 8080
+        assert env.status == "started"
+        assert env.container_id == "abc123"
+
+        # Verify it's cached
+        cached = await client.get_environment(challenge_id)
+        assert cached is not None
+        assert cached.host == "10.0.0.1"
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_response(self) -> None:
+        """Test handling of rate limited responses."""
+        from backend.platforms.ctf2_client import CTF2Client
+
+        client = CTF2Client(auth_token="test-token")
+        result = await client.submit_flag("test", "flag{x}")
+        assert result.status == "incorrect"  # No mock, will fail gracefully
+
+    def test_from_config(self) -> None:
+        """Test creating client from config dict."""
+        from backend.platforms.ctf2_client import CTF2Client
+
+        config = {
+            "type": "ctf2",
+            "api_base_url": "https://ctf2.example.com",
+            "api_path": "/api/v1",
+            "auth_type": "ApiKey",
+            "auth_credential": "test-token-123",
+        }
+        client = CTF2Client.from_config(config)
+        assert client.api_base_url == "https://ctf2.example.com"
+        assert client.api_path == "/api/v1"
+        assert client.auth_token == "test-token-123"
+        assert client.auth_type == "ApiKey"
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

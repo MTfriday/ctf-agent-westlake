@@ -84,6 +84,15 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                     api_key=settings.opencode_zen_api_key,
                 ),
             )
+        case "deepseek":
+            # DeepSeek — OpenAI 兼容接口
+            return OpenAIModel(
+                model_id,
+                provider=OpenAIProvider(
+                    base_url=settings.deepseek_base_url,
+                    api_key=settings.deepseek_api_key,
+                ),
+            )
         case "bailian":
             # 阿里百炼 — OpenAI 兼容接口
             return OpenAIModel(
@@ -118,10 +127,10 @@ def resolve_model_settings(spec: str) -> ModelSettings:
                 bedrock_cache_tool_definitions=True,
                 bedrock_cache_messages=True,
             )
-        case "azure" | "zen" | "bailian":
-            # Azure/Zen/Bailian use OpenAI chat completions — server-side prompt caching
-            # is automatic, no explicit config needed. Set max_tokens to avoid
-            # reserving the full context window.
+        case "azure" | "zen" | "bailian" | "deepseek":
+            # Azure/Zen/Bailian/DeepSeek use OpenAI chat completions — server-side
+            # prompt caching is automatic, no explicit config needed. Set max_tokens
+            # to avoid reserving the full context window.
             return OpenAIModelSettings(
                 max_tokens=128_000,
             )

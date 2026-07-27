@@ -3,18 +3,25 @@
 
 # ========== 比赛平台 API ==========
 platform:
-  # 平台类型: "generic" | "ctfd"
-  type: "generic"
+  # 平台类型: "generic" | "ctfd" | "ctf2"
+  type: "ctf2"
 
-  # 通用 API 配置（type=generic 时生效）
-  api_base_url: ""                          # 赛事平台API基础URL
-  auth_type: "Bearer"                       # "Bearer" | "ApiKey" | "Header"
-  auth_credential: "ctf2_58b12ab4bcd2ad18030022370dbc217c759ecab8c7ee13ef3bb76d6a542271ca"                       # 认证凭证（或通过环境变量 TEAM_TOKEN）
-  endpoints:
-    list_challenges: "/api/challenges"       # 获取题目列表
-    get_challenge: "/api/challenge"          # 获取单题详情（支持 ?id=xxx）
-    download_attachment: "/api/attachment"   # 下载附件（支持 ?id=xxx）
-    submit_flag: "/api/flag"                 # 提交Flag
+  # ===== CTF2 配置 (type=ctf2) =====
+  # 认证凭证（推荐方式：PersonalAccessToken，通过 X-CTF2-API-Key header）
+  auth_type: "ApiKey"                       # "ApiKey" | "Bearer"
+  auth_credential: "ctf2_58b12ab4bcd2ad18030022370dbc217c759ecab8c7ee13ef3bb76d6a542271ca"
+  api_base_url: "https://ctf2.dasctf.com"   # CTF2 基础URL
+  api_path: "/api/open/v1"                  # CTF2 API 路径前缀
+
+  # ===== 通用 API 配置（type=generic 时生效）=====
+  # api_base_url: ""                         # 赛事平台API基础URL
+  # auth_type: "Bearer"                      # "Bearer" | "ApiKey" | "Header"
+  # auth_credential: ""                      # 认证凭证（或通过环境变量 TEAM_TOKEN）
+  # endpoints:
+  #   list_challenges: "/api/challenges"     # 获取题目列表
+  #   get_challenge: "/api/challenge"        # 获取单题详情（支持 ?id=xxx）
+  #   download_attachment: "/api/attachment" # 下载附件（支持 ?id=xxx）
+  #   submit_flag: "/api/flag"               # 提交Flag
 
 # ========== LLM 配置 ==========
 llm:
