@@ -12,7 +12,7 @@ from backend.agents.solver import Solver
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.message_bus import ChallengeMessageBus
-from backend.models import DEFAULT_MODELS, provider_from_spec
+from backend.models import provider_from_spec, resolve_model_specs
 from backend.prompts import ChallengeMeta
 from backend.solver_base import (
     CANCELLED,
@@ -52,9 +52,14 @@ class ChallengeSwarm:
     ctfd: CTFdClient
     cost_tracker: CostTracker
     settings: Settings
-    model_specs: list[str] = field(default_factory=lambda: list(DEFAULT_MODELS))
+    model_specs: list[str] = field(default_factory=list)
     no_submit: bool = False
     coordinator_inbox: asyncio.Queue | None = None
+
+    def __post_init__(self) -> None:
+        """Resolve model specs from settings if not explicitly provided."""
+        if not self.model_specs:
+            self.model_specs = resolve_model_specs(settings=self.settings)
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)

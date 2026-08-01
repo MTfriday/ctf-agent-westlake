@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     container_memory_limit: str = "16g"
     rate_limit_rps: int = 5
 
+    # 模型选择（逗号分隔的模型规格，如 "deepseek/deepseek-chat,bailian/qwen-max"）
+    # 留空 = 自动检测可用 provider
+    models: str = ""
+
     # ========== 仪表盘 ==========
     dashboard_port: int = 8501
     dashboard_enabled: bool = True

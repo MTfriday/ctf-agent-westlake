@@ -39,6 +39,10 @@ solver:
   max_attempts_per_challenge: 3              # 每题最多尝试次数
   model_temperature: 0.7                     # 模型温度
   retry_delay_seconds: 30                    # 重试间隔
+  # 模型选择（逗号分隔，留空=自动检测可用provider）
+  # 没有 claude/codex CLI 时会自动回退到 OpenAI 兼容 API
+  # 示例: "deepseek/deepseek-chat,deepseek/deepseek-reasoner"
+  models: ""
 
 # ========== Flag 配置 ==========
 flag:

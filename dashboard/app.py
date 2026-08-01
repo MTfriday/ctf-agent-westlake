@@ -35,6 +35,9 @@ LOG_DIR = Path("logs")
 CHALLENGES_DIR = Path("challenges")
 CONFIG_PATH = Path("config.yaml")
 
+# Cache TTL in seconds
+CACHE_TTL = 2  # Match auto-refresh interval
+
 # Coordinator message endpoint
 COORDINATOR_HOST = os.environ.get("COORDINATOR_HOST", "127.0.0.1")
 COORDINATOR_MSG_PORT = int(os.environ.get("COORDINATOR_MSG_PORT", "9400"))
@@ -66,6 +69,7 @@ CATEGORY_ICONS: dict[str, str] = {
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def _load_config() -> dict[str, Any]:
     """Load config.yaml with defaults."""
     if CONFIG_PATH.exists():
@@ -74,19 +78,29 @@ def _load_config() -> dict[str, Any]:
     return {}
 
 
-def _get_trace_files() -> list[Path]:
-    """Get all solver trace JSONL files, newest first."""
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _get_trace_files() -> list[tuple[str, float]]:
+    """Get all solver trace JSONL file paths and mtimes, newest first."""
     if not LOG_DIR.exists():
         return []
     files = sorted(LOG_DIR.glob("trace-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files
+    return [(str(f), f.stat().st_mtime) for f in files]
 
 
-def _parse_trace_file(path: Path) -> list[dict[str, Any]]:
+def _get_trace_path(index: int = 0) -> Path | None:
+    """Get the nth trace file path from cache."""
+    files = _get_trace_files()
+    if not files:
+        return None
+    return Path(files[index][0])
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _parse_trace_file(path_str: str) -> list[dict[str, Any]]:
     """Parse a JSONL trace file into a list of events."""
     events: list[dict[str, Any]] = []
     try:
-        for line in path.read_text().strip().split("\n"):
+        for line in Path(path_str).read_text().strip().split("\n"):
             if line.strip():
                 events.append(json.loads(line))
     except (json.JSONDecodeError, FileNotFoundError):
@@ -94,6 +108,7 @@ def _parse_trace_file(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def _get_challenge_metas() -> dict[str, dict[str, Any]]:
     """Load all challenge metadata from challenges/ directory."""
     metas: dict[str, dict[str, Any]] = {}
@@ -275,7 +290,7 @@ def _render_challenge_detail(name: str, meta: dict[str, Any]) -> None:
     # Solver traces
     for tf in trace_files:
         model_id = tf.stem.replace(f"trace-{name.replace('/', '_')}-", "").rsplit("-", 1)[0]
-        events = _parse_trace_file(tf)
+        events = _parse_trace_file(str(tf))
 
         with st.expander(f"🤖 {model_id} ({len(events)} events)", expanded=True):
             # Summary stats
@@ -388,11 +403,12 @@ def _render_overview() -> None:
     # Derive status from traces
     challenge_status: dict[str, str] = {}
     challenge_steps: dict[str, int] = {}
-    for tf in trace_files:
-        parts = tf.stem.replace("trace-", "").rsplit("-", 2)
+    for path_str, _mtime in trace_files:
+        tf_path = Path(path_str)
+        parts = tf_path.stem.replace("trace-", "").rsplit("-", 2)
         if len(parts) >= 2:
             ch_name = parts[0]
-            events = _parse_trace_file(tf)
+            events = _parse_trace_file(path_str)
             status = _get_status_from_traces(events)
             if ch_name not in challenge_status or status == "solved":
                 challenge_status[ch_name] = status

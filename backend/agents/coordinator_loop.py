@@ -13,7 +13,7 @@ from backend.config import Settings
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.deps import CoordinatorDeps
-from backend.models import DEFAULT_MODELS
+from backend.models import resolve_model_specs
 from backend.poller import CTFdPoller
 from backend.prompts import ChallengeMeta
 
@@ -39,7 +39,7 @@ def build_deps(
         password=settings.ctfd_pass,
     )
     cost_tracker = CostTracker()
-    specs = model_specs or list(DEFAULT_MODELS)
+    specs = model_specs or resolve_model_specs(settings=settings)
     Path(challenges_root).mkdir(parents=True, exist_ok=True)
 
     deps = CoordinatorDeps(

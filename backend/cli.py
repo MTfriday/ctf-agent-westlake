@@ -11,7 +11,7 @@ import click
 from rich.console import Console
 
 from backend.config import Settings
-from backend.models import DEFAULT_MODELS
+from backend.models import resolve_model_specs
 
 console = Console()
 
@@ -68,7 +68,7 @@ def main(
         settings.ctfd_token = ctfd_token
     settings.max_concurrent_challenges = max_challenges
 
-    model_specs = list(models) if models else list(DEFAULT_MODELS)
+    model_specs = resolve_model_specs(settings=settings, cli_models=list(models) if models else None)
 
     console.print("[bold]CTF Agent v2[/bold]")
     console.print(f"  CTFd: {settings.ctfd_url}")
