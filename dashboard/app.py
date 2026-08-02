@@ -133,7 +133,7 @@ def _get_challenge_metas() -> dict[str, dict[str, Any]]:
     return metas
 
 
-def _send_operator_message(message: str) -> bool:
+def _send_operator_message(message: str, timeout: float = 2.0) -> bool:
     """Send a message to the running coordinator via HTTP."""
     try:
         body = json.dumps({"message": message}).encode()
@@ -143,11 +143,20 @@ def _send_operator_message(message: str) -> bool:
             content=body,
             headers={"Content-Type": "application/json"},
         )
-        with httpx.Client() as client:
-            resp = client.send(req, timeout=5)
+        # NOTE: httpx.Client.send() takes NO timeout kwarg — set it on the Client.
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.send(req)
             return resp.status_code == 200
     except Exception:
         return False
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _check_coordinator() -> bool:
+    """Check coordinator connectivity (cached to avoid blocking every render)."""
+    # Short timeout: connection refused fails instantly; only a genuinely
+    # starting engine hits the timeout, and that's capped at 0.5s.
+    return _send_operator_message("ping", timeout=0.5)
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -157,9 +166,9 @@ def _render_sidebar() -> None:
     st.sidebar.title("🏴 CTF Agent")
     st.sidebar.caption("Human-Machine Collaboration Dashboard")
 
-    # Coordinator connection status
+    # Coordinator connection status (cached — doesn't block every render)
     st.sidebar.subheader("🔗 Coordinator")
-    if _send_operator_message("ping"):
+    if _check_coordinator():
         st.sidebar.success("✅ Connected")
     else:
         st.sidebar.warning("⚠️ Not connected")

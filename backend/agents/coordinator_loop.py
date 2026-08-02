@@ -23,6 +23,45 @@ logger = logging.getLogger(__name__)
 TurnFn = Callable[[str], Coroutine[Any, Any, None]]
 
 
+def _build_platform_client(settings: Settings) -> Any:
+    """Build the platform client based on settings.platform_type.
+
+    Returns an object with the CTFd-style interface used by the runtime:
+    fetch_challenge_stubs / fetch_all_challenges / fetch_solved_names /
+    submit_flag / pull_challenge / close.
+    """
+    from backend.ctfd import CTFdClient
+    from backend.platforms.adapter import PlatformAdapter
+
+    platform_type = getattr(settings, "platform_type", "ctfd")
+    if platform_type == "ctf2":
+        from backend.platforms.ctf2_client import CTF2Client
+        client = CTF2Client.from_settings(settings)
+        logger.info("Using CTF2 platform client: %s", client.api_base_url)
+        return PlatformAdapter(client)
+
+    if platform_type == "generic":
+        from backend.platforms.generic import GenericRestClient
+        client = GenericRestClient.from_settings(settings)
+        logger.info("Using generic platform client: %s", client.api_base_url)
+        return PlatformAdapter(client)
+
+    if platform_type == "gzctf":
+        from backend.platforms.gzctf_client import GZCTFClient
+        client = GZCTFClient.from_settings(settings)
+        logger.info("Using GZCTF platform client: %s", client.api_base_url)
+        return PlatformAdapter(client)
+
+    # Default: CTFd
+    logger.info("Using CTFd platform client: %s", settings.ctfd_url)
+    return CTFdClient(
+        base_url=settings.ctfd_url,
+        token=settings.ctfd_token,
+        username=settings.ctfd_user,
+        password=settings.ctfd_pass,
+    )
+
+
 def build_deps(
     settings: Settings,
     model_specs: list[str] | None = None,
@@ -30,20 +69,21 @@ def build_deps(
     no_submit: bool = False,
     challenge_dirs: dict[str, str] | None = None,
     challenge_metas: dict[str, ChallengeMeta] | None = None,
-) -> tuple[CTFdClient, CostTracker, CoordinatorDeps]:
-    """Create CTFd client, cost tracker, and coordinator deps."""
-    ctfd = CTFdClient(
-        base_url=settings.ctfd_url,
-        token=settings.ctfd_token,
-        username=settings.ctfd_user,
-        password=settings.ctfd_pass,
-    )
+) -> tuple[Any, CostTracker, CoordinatorDeps]:
+    """Create platform client, cost tracker, and coordinator deps.
+
+    Selects the platform client based on settings.platform_type:
+      - "ctf2"    → CTF2Client wrapped in PlatformAdapter
+      - "generic" → GenericRestClient wrapped in PlatformAdapter
+      - "ctfd"    → CTFdClient (existing)
+    """
+    platform = _build_platform_client(settings)
     cost_tracker = CostTracker()
     specs = model_specs or resolve_model_specs(settings=settings)
     Path(challenges_root).mkdir(parents=True, exist_ok=True)
 
     deps = CoordinatorDeps(
-        ctfd=ctfd,
+        ctfd=platform,
         cost_tracker=cost_tracker,
         settings=settings,
         model_specs=specs,
@@ -63,12 +103,12 @@ def build_deps(
                 deps.challenge_dirs[meta.name] = str(d)
                 deps.challenge_metas[meta.name] = meta
 
-    return ctfd, cost_tracker, deps
+    return platform, cost_tracker, deps
 
 
 async def run_event_loop(
     deps: CoordinatorDeps,
-    ctfd: CTFdClient,
+    ctfd: Any,
     cost_tracker: CostTracker,
     turn_fn: TurnFn,
     status_interval: int = 60,
@@ -77,7 +117,7 @@ async def run_event_loop(
 
     Args:
         deps: Coordinator dependencies (shared state).
-        ctfd: CTFd client (for poller).
+        ctfd: Platform client (CTFdClient or PlatformAdapter) used by the poller.
         cost_tracker: Cost tracker.
         turn_fn: Async function that sends a message to the coordinator LLM.
         status_interval: Seconds between status updates.
@@ -154,7 +194,8 @@ async def run_event_loop(
                 try:
                     op_msg = deps.operator_inbox.get_nowait()
                     parts.append(f"OPERATOR MESSAGE: {op_msg}")
-                    logger.info("Operator message: %s", op_msg[:200])
+                    # op_msg may be a dict/other if a client posted {"message": {...}} — str() to be safe
+                    logger.info("Operator message: %s", str(op_msg)[:200])
                 except asyncio.QueueEmpty:
                     break
 
@@ -254,6 +295,10 @@ async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Serv
                 try:
                     data = json.loads(body)
                     message = data.get("message", body.decode())
+                    # If a client posts {"message": {...}} the value is a dict —
+                    # coerce to a JSON string so downstream [:200] slicing stays safe.
+                    if not isinstance(message, str):
+                        message = json.dumps(message, ensure_ascii=False)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     message = body.decode("utf-8", errors="replace")
 

@@ -38,7 +38,7 @@ class SolverDeps:
 
 @dataclass
 class CoordinatorDeps:
-    ctfd: CTFdClient
+    ctfd: Any  # Platform client: CTFdClient or PlatformAdapter (CTFd-style interface)
     cost_tracker: CostTracker
     settings: Any
     model_specs: list[str] = field(default_factory=list)

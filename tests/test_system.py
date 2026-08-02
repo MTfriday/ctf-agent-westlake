@@ -159,15 +159,26 @@ class TestRateLimiter:
 
     @pytest.mark.asyncio
     async def test_rate_limiter_blocks_excessive(self) -> None:
-        """Test that excessive requests are blocked."""
+        """Test that excessive requests are throttled (block until refill)."""
+        import time
+
         from backend.platforms.rate_limiter import RateLimiter
 
-        limiter = RateLimiter(rps=1000, burst=2)  # Low burst
-        await limiter.acquire()  # OK
-        await limiter.acquire()  # OK (burst)
-        # Third acquire would block — verify it waits
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(limiter.acquire(), timeout=0.05)
+        limiter = RateLimiter(rps=10, burst=1)  # 1 token burst, refills 10/sec
+        await limiter.acquire()  # consume the only token
+        start = time.monotonic()
+        await limiter.acquire()  # must wait for refill (>= ~0.1s), NOT return instantly
+        elapsed = time.monotonic() - start
+        assert elapsed >= 0.05  # it actually blocked for a refill interval
+
+    @pytest.mark.asyncio
+    async def test_rate_limiter_no_deadlock_under_concurrency(self) -> None:
+        """Test that many concurrent acquires all eventually get tokens (no deadlock)."""
+        from backend.platforms.rate_limiter import RateLimiter
+
+        limiter = RateLimiter(rps=20, burst=2)  # small burst, fast refill
+        results = await asyncio.gather(*[limiter.acquire() for _ in range(12)])
+        assert all(r is None for r in results)  # all 12 acquired without hanging
 
 
 # ── Challenge Router Tests ───────────────────────────────────────────────────
@@ -565,6 +576,61 @@ class TestCoordinatorTools:
         assert "capacity" in capacity_msg.lower()
 
 
+# ── Unified Config Tests ────────────────────────────────────────────────────
+
+
+class TestUnifiedConfig:
+    """Test that Settings reads config.yaml (non-secret) + .env (secrets)."""
+
+    def test_settings_loads_config_yaml(self) -> None:
+        """Test that non-secret config is loaded from config.yaml."""
+        from backend.config import Settings
+
+        s = Settings()
+        # These come from config.yaml (currently GZCTF mode)
+        assert s.platform_type == "gzctf"
+        assert s.platform_api_base_url == "http://150.158.131.227:65534"
+        assert s.platform_auth_type == "Bearer"
+        assert s.rate_limit_rps == 5
+        assert s.sandbox_image == "ctf-sandbox"
+
+    def test_settings_loads_env_secrets(self) -> None:
+        """Test that secret credentials are loaded from .env."""
+        from backend.config import Settings
+
+        s = Settings()
+        # platform_auth_credential comes from .env PLATFORM_AUTH_CREDENTIAL
+        # (config.yaml has it empty)
+        assert s.platform_auth_credential.startswith("ctf2_")
+        # deepseek key from .env
+        assert s.deepseek_api_key.startswith("sk-")
+
+    def test_env_overrides_config_yaml(self) -> None:
+        """Test that .env values override config.yaml (priority)."""
+        from backend.config import Settings
+
+        # Set an env var that should override config.yaml's value
+        import os
+        os.environ["MAX_CONCURRENT_CHALLENGES"] = "3"
+        try:
+            s = Settings()
+            assert s.max_concurrent_challenges == 3  # .env wins over config.yaml
+        finally:
+            os.environ.pop("MAX_CONCURRENT_CHALLENGES", None)
+
+    def test_gzctf_client_from_settings(self) -> None:
+        """Test GZCTFClient factory reads from the real unified Settings."""
+        from backend.config import Settings
+        from backend.platforms.gzctf_client import GZCTFClient
+
+        s = Settings()
+        client = GZCTFClient.from_settings(s)
+        assert client.api_base_url == s.platform_api_base_url
+        assert client.username == s.gzctf_username
+        assert client.password == s.gzctf_password
+        assert client.auth_token == s.gzctf_token
+
+
 # ── CTF2 Client Tests ───────────────────────────────────────────────────────
 
 
@@ -740,6 +806,332 @@ class TestCTF2Client:
         assert client.api_path == "/api/v1"
         assert client.auth_token == "test-token-123"
         assert client.auth_type == "ApiKey"
+
+
+# ── GZCTF Client Tests ──────────────────────────────────────────────────────
+
+
+class TestGZCTFClient:
+    """Test the GZCTF-specific platform client."""
+
+    @pytest.mark.asyncio
+    async def test_compound_id_roundtrip(self) -> None:
+        """Test that GZCTF compound IDs (game::game_id::challenge_id) roundtrip."""
+        from backend.platforms.gzctf_client import (
+            _make_challenge_id,
+            _parse_challenge_id,
+        )
+
+        cid = _make_challenge_id("game_42", "challenge_7")
+        assert cid == "game::game_42::challenge_7"
+        game_id, ch_id = _parse_challenge_id(cid)
+        assert game_id == "game_42"
+        assert ch_id == "challenge_7"
+
+        # Fallback for plain IDs
+        game_id, ch_id = _parse_challenge_id("simple_id")
+        assert game_id == ""
+        assert ch_id == "simple_id"
+
+    @pytest.mark.asyncio
+    async def test_fetch_challenges_parses_gzctf_format(self) -> None:
+        """Test fetch_challenges handles GZCTF's {data,...} list + category dict."""
+        from backend.platforms.gzctf_client import GZCTFClient
+
+        client = GZCTFClient(api_base_url="http://gzctf.test")
+
+        async def mock_request(method: str, path: str, **kwargs: object) -> object:
+            if "/api/game?" in path:
+                # ArrayResponseOfBasicGameInfoModel: {data, length, total}
+                return {
+                    "data": [{"id": 1, "title": "Demo CTF"}],
+                    "length": 1,
+                    "total": 1,
+                }
+            if path.endswith("/details"):
+                # GameDetailModel is returned directly (not wrapped in {data}):
+                # {challenges: {Category: [ChallengeInfo]}, rank: ScoreboardItem}
+                return {
+                    "challenges": {
+                        "Web": [
+                            {"id": 11, "title": "Easy Web", "category": "Web", "score": 100, "solved": 3},
+                        ],
+                        "Crypto": [
+                            {"id": 12, "title": "Crypto 1", "category": "Crypto", "score": 200, "solved": 0},
+                        ],
+                    },
+                    "challengeCount": 2,
+                    "rank": {
+                        "solvedChallenges": [{"id": 11, "challengeId": 11, "score": 100}],
+                    },
+                    "teamToken": "abc",
+                }
+            return {}
+
+        client._request = mock_request  # type: ignore[assignment]
+
+        challenges = await client.fetch_challenges()
+        assert len(challenges) == 2
+        assert challenges[0].name == "Easy Web"
+        assert challenges[0].category == "Web"
+        assert challenges[0].value == 100
+        # Compound id embeds game + challenge ids
+        assert "game::1::11" in str(challenges[0].id)
+
+        # fetch_solved uses rank.solvedChallenges
+        solved = await client.fetch_solved()
+        assert "game::1::11" in solved
+
+    @pytest.mark.asyncio
+    async def test_submit_flag_two_stage(self) -> None:
+        """Test flag submission: POST → submitId, then GET status → Accepted."""
+        from backend.platforms.gzctf_client import GZCTFClient
+
+        client = GZCTFClient(api_base_url="http://gzctf.test")
+        challenge_id = "game::1::11"
+
+        calls: list[tuple] = []
+
+        async def mock_request(method: str, path: str, **kwargs: object) -> object:
+            calls.append((method, path, kwargs))
+            if method == "POST":
+                # Server returns submitId as plain int
+                return 505
+            if "status/505" in path:
+                return {"data": {"result": "Accepted"}}
+            return {}
+
+        client._request = mock_request  # type: ignore[assignment]
+
+        result = await client.submit_flag(challenge_id, "flag{abc}")
+
+        # POST then GET status
+        assert len(calls) == 2
+        post_method, post_path, post_kwargs = calls[0]
+        assert post_method == "POST"
+        assert post_path == "/api/game/1/challenges/11"
+        assert post_kwargs.get("json", {}).get("flag") == "flag{abc}"
+
+        assert calls[1][0] == "GET"
+        assert "status/505" in calls[1][1]
+        assert result.status == "correct"
+
+    @pytest.mark.asyncio
+    async def test_submit_flag_wrong_answer(self) -> None:
+        """Test wrong flag maps to incorrect."""
+        from backend.platforms.gzctf_client import GZCTFClient
+
+        client = GZCTFClient(api_base_url="http://gzctf.test")
+
+        async def mock_request(method: str, path: str, **kwargs: object) -> object:
+            if method == "POST":
+                return 606
+            return {"data": {"result": "WrongAnswer"}}
+
+        client._request = mock_request  # type: ignore[assignment]
+
+        result = await client.submit_flag("game::1::11", "wrong{flag}")
+        assert result.status == "incorrect"
+
+    @pytest.mark.asyncio
+    async def test_start_environment(self) -> None:
+        """Test creating a dynamic container returns the entry point."""
+        from backend.platforms.gzctf_client import GZCTFClient
+
+        client = GZCTFClient(api_base_url="http://gzctf.test")
+
+        async def mock_request(method: str, path: str, **kwargs: object) -> object:
+            return {
+                "data": {
+                    "status": "Running",
+                    "startedAt": 1700000000,
+                    "expectStopAt": 1700003600,
+                    "entry": "http://10.0.0.5:8080",
+                }
+            }
+
+        client._request = mock_request  # type: ignore[assignment]
+
+        env = await client.start_environment("game::1::11")
+        assert env.status == "Running"
+        assert env.entry == "http://10.0.0.5:8080"
+        assert env.started_at == 1700000000
+
+    @pytest.mark.asyncio
+    async def test_get_challenge_detail_uses_context(self) -> None:
+        """Test challenge detail pulls attachment url + instance entry from context."""
+        from backend.platforms.gzctf_client import GZCTFClient
+
+        client = GZCTFClient(api_base_url="http://gzctf.test")
+
+        async def mock_request(method: str, path: str, **kwargs: object) -> object:
+            return {
+                "data": {
+                    "id": 11,
+                    "title": "Easy Web",
+                    "category": "Web",
+                    "content": "Find the flag!",
+                    "score": 100,
+                    "type": "DynamicContainer",
+                    "hints": [{"id": 1, "content": "Use curl"}],
+                    "context": {
+                        "url": "/assets/abc123/file.zip",
+                        "instanceEntry": "http://10.0.0.9:9000",
+                        "fileSize": 12345,
+                    },
+                }
+            }
+
+        client._request = mock_request  # type: ignore[assignment]
+
+        info = await client.get_challenge_detail("game::1::11")
+        assert info.name == "Easy Web"
+        assert info.description == "Find the flag!"
+        assert info.connection_info == "http://10.0.0.9:9000"
+        assert len(info.files) == 1
+        assert info.files[0]["url"] == "/assets/abc123/file.zip"
+
+    def test_from_settings(self) -> None:
+        """Test creating client from the unified Settings object."""
+        from backend.platforms.gzctf_client import GZCTFClient
+
+        class FakeSettings:
+            platform_api_base_url = "http://150.158.131.227:65534"
+            gzctf_username = "alice"
+            gzctf_password = "secret"
+            gzctf_token = ""
+            rate_limit_rps = 5
+
+        client = GZCTFClient.from_settings(FakeSettings())  # type: ignore[arg-type]
+        assert client.api_base_url == "http://150.158.131.227:65534"
+        assert client.username == "alice"
+        assert client.password == "secret"
+        assert client.auth_token == ""
+
+
+# ── Platform Adapter Tests ──────────────────────────────────────────────────
+
+
+class TestPlatformAdapter:
+    """Test the unified adapter that wraps PlatformClient into CTFd-style interface."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_and_submit_by_name(self) -> None:
+        """Test that challenges are cached by name and submit resolves by name."""
+        from unittest.mock import AsyncMock
+
+        from backend.platforms.adapter import PlatformAdapter
+        from backend.platforms.base import ChallengeInfo, SubmitResult
+
+        mock_client = AsyncMock()
+        mock_client.fetch_challenges = AsyncMock(return_value=[
+            ChallengeInfo(id="ch1", name="Web Challenge", category="web",
+                          value=100, solved=False),
+            ChallengeInfo(id="ch2", name="Crypto Challenge", category="crypto",
+                          value=200, solved=False),
+        ])
+        mock_client.fetch_solved = AsyncMock(return_value={"ch1"})
+        mock_client.submit_flag = AsyncMock(return_value=SubmitResult(
+            "correct", "accepted", "CORRECT"))
+
+        adapter = PlatformAdapter(mock_client)
+
+        # Fetch all
+        challenges = await adapter.fetch_all_challenges()
+        assert len(challenges) == 2
+
+        # Solved names resolved from cache
+        solved = await adapter.fetch_solved_names()
+        assert "Web Challenge" in solved
+
+        # Submit by name resolves to ch1's compound id
+        result = await adapter.submit_flag("Web Challenge", "flag{x}")
+        assert result.status == "correct"
+        mock_client.submit_flag.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pull_challenge_writes_metadata(self, tmp_path: Path) -> None:
+        """Test that pull_challenge writes metadata.yml and downloads files."""
+        from unittest.mock import AsyncMock
+
+        from backend.platforms.adapter import PlatformAdapter
+        from backend.platforms.base import ChallengeInfo
+
+        mock_client = AsyncMock()
+        mock_client.fetch_challenges = AsyncMock(return_value=[
+            ChallengeInfo(id="ch1", name="Test Challenge", category="web",
+                          description="A test", files=[{"name": "file.txt", "url": "http://x/file.txt"}]),
+        ])
+        mock_client.download_attachment = AsyncMock(return_value=b"file content")
+
+        adapter = PlatformAdapter(mock_client)
+        ch_data = {
+            "id": "ch1", "name": "Test Challenge", "category": "web",
+            "value": 100, "description": "A test", "files": [{"name": "file.txt", "url": "http://x/file.txt"}],
+        }
+
+        out_dir = await adapter.pull_challenge(ch_data, str(tmp_path))
+
+        import yaml
+        meta_path = Path(out_dir) / "metadata.yml"
+        assert meta_path.exists()
+        meta = yaml.safe_load(meta_path.read_text())
+        assert meta["name"] == "Test Challenge"
+
+        dist = Path(out_dir) / "distfiles" / "file.txt"
+        assert dist.exists()
+        assert dist.read_bytes() == b"file content"
+
+    def test_diagnostics_passthrough(self) -> None:
+        """Test that adapter surfaces underlying client diagnostics."""
+        from backend.platforms.adapter import PlatformAdapter
+
+        mock_client = MagicMock()
+        mock_client.diagnostics = MagicMock(return_value={"platform": "ctf2"})
+        adapter = PlatformAdapter(mock_client)
+        assert adapter.diagnostics() == {"platform": "ctf2"}
+
+
+# ── Coordinator Selection Tests ──────────────────────────────────────────────
+
+
+class TestCoordinatorSelection:
+    """Test coordinator backend resolution."""
+
+    def test_auto_resolves_to_pydantic(self) -> None:
+        """Test that 'auto' coordinator defaults to pydantic (no CLI needed)."""
+        from backend.cli import _resolve_coordinator
+        from backend.config import Settings
+
+        s = Settings()
+        # Force no claude/codex available
+        assert _resolve_coordinator(s, "auto") == "pydantic"
+
+    def test_cli_value_wins(self) -> None:
+        """Test that explicit CLI value takes priority."""
+        from backend.cli import _resolve_coordinator
+        from backend.config import Settings
+
+        s = Settings()
+        assert _resolve_coordinator(s, "claude") == "claude"
+        assert _resolve_coordinator(s, "codex") == "codex"
+
+    def test_configured_setting_used(self) -> None:
+        """Test that configured settings.coordinator is used when CLI is auto."""
+        from backend.cli import _resolve_coordinator
+        from backend.config import Settings
+
+        s = Settings()
+        s.coordinator = "claude"
+        assert _resolve_coordinator(s, "auto") == "claude"
+
+    def test_platform_label_gzctf(self) -> None:
+        """Test the platform label shows GZCTF for the active config."""
+        from backend.cli import _platform_label
+        from backend.config import Settings
+
+        s = Settings()
+        assert "GZCTF" in _platform_label(s)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

@@ -54,8 +54,22 @@ class GenericRestClient(PlatformClient):
         self._client: httpx.AsyncClient | None = None
 
     @classmethod
+    def from_settings(cls, settings: object) -> GenericRestClient:
+        """Create a GenericRestClient from the unified Settings object."""
+        return cls(
+            api_base_url=getattr(settings, "platform_api_base_url", ""),
+            auth_type=getattr(settings, "platform_auth_type", "Bearer"),
+            auth_credential=getattr(settings, "platform_auth_credential", ""),
+            endpoints=getattr(settings, "platform_endpoints", {}),
+            rate_limit_rps=getattr(settings, "rate_limit_rps", 5),
+        )
+
+    @classmethod
     def from_config(cls, config_path: str | Path = "config.yaml") -> GenericRestClient:
-        """Create a GenericRestClient from config.yaml."""
+        """Create a GenericRestClient from config.yaml.
+
+        Deprecated: prefer from_settings() which uses the unified Settings.
+        """
         with open(config_path) as f:
             cfg = yaml.safe_load(f) or {}
         plat = cfg.get("platform", {})

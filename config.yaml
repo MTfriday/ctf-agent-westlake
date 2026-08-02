@@ -3,20 +3,25 @@
 
 # ========== 比赛平台 API ==========
 platform:
-  # 平台类型: "generic" | "ctfd" | "ctf2"
-  type: "ctf2"
+  # 平台类型: "generic" | "ctfd" | "ctf2" | "gzctf"
+  type: "gzctf"
+
+  # ===== GZCTF 配置 (type=gzctf) =====
+  # 凭据从 .env 读取：GZCTF_USERNAME / GZCTF_PASSWORD（会话登录）或 GZCTF_TOKEN（推荐）
+  auth_type: "Bearer"
+  api_base_url: "http://150.158.131.227:65534"   # GZCTF 基础URL
 
   # ===== CTF2 配置 (type=ctf2) =====
-  # 认证凭证（推荐方式：PersonalAccessToken，通过 X-CTF2-API-Key header）
-  auth_type: "ApiKey"                       # "ApiKey" | "Bearer"
-  auth_credential: "ctf2_58b12ab4bcd2ad18030022370dbc217c759ecab8c7ee13ef3bb76d6a542271ca"
-  api_base_url: "https://ctf2.dasctf.com"   # CTF2 基础URL
-  api_path: "/api/open/v1"                  # CTF2 API 路径前缀
+  # 认证方式（推荐：ApiKey → X-CTF2-API-Key header）
+  # auth_type: "ApiKey"                       # "ApiKey" | "Bearer"
+  # auth_credential: ""                       # SECRET — 从 .env 的 PLATFORM_AUTH_CREDENTIAL 读取
+  # api_base_url: "https://ctf2.dasctf.com"   # CTF2 基础URL
+  # api_path: "/api/open/v1"                  # CTF2 API 路径前缀
 
   # ===== 通用 API 配置（type=generic 时生效）=====
   # api_base_url: ""                         # 赛事平台API基础URL
   # auth_type: "Bearer"                      # "Bearer" | "ApiKey" | "Header"
-  # auth_credential: ""                      # 认证凭证（或通过环境变量 TEAM_TOKEN）
+  # auth_credential: ""                      # 认证凭证（从 .env PLATFORM_AUTH_CREDENTIAL 读取）
   # endpoints:
   #   list_challenges: "/api/challenges"     # 获取题目列表
   #   get_challenge: "/api/challenge"        # 获取单题详情（支持 ?id=xxx）
@@ -41,8 +46,16 @@ solver:
   retry_delay_seconds: 30                    # 重试间隔
   # 模型选择（逗号分隔，留空=自动检测可用provider）
   # 没有 claude/codex CLI 时会自动回退到 OpenAI 兼容 API
-  # 示例: "deepseek/deepseek-chat,deepseek/deepseek-reasoner"
+  # 示例: "deepseek/deepseek-v4-flash,deepseek/deepseek-v4-pro"
   models: ""
+
+  # Coordinator 后端: "claude" | "codex" | "pydantic" | "auto"
+  # pydantic 可用任意 OpenAI 兼容模型（DeepSeek/百炼），无需 claude/codex CLI
+  coordinator: "auto"
+  # Coordinator 使用的模型（仅 pydantic 后端生效），如 "deepseek/deepseek-v4-flash"
+  coordinator_model: ""
+  # 操作员消息 HTTP 端口（仪表盘 ↔ 引擎通信，两端必须一致）
+  operator_msg_port: 9400
 
 # ========== Flag 配置 ==========
 flag:

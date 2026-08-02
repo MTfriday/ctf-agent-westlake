@@ -27,9 +27,10 @@ DEFAULT_MODELS: list[str] = [
 ]
 
 # Fallback models for environments without claude/codex CLIs — uses OpenAI-compatible APIs
+# DeepSeek 新版模型：v4-flash（默认，便宜）/ v4-pro（更强但贵，仅复杂题用）
 FALLBACK_MODELS: list[str] = [
-    "deepseek/deepseek-chat",
-    "deepseek/deepseek-reasoner",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
     "bailian/qwen-max",
     "bailian/qwen-plus",
     "openai/gpt-4o",
@@ -129,6 +130,9 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5.3-codex": 1_000_000,
     "gpt-5.3-codex-spark": 128_000,
     "gemini-3-flash-preview": 1_000_000,
+    # DeepSeek 新版模型
+    "deepseek-v4-flash": 128_000,
+    "deepseek-v4-pro": 128_000,
 }
 
 # Models that support vision
@@ -221,8 +225,18 @@ def resolve_model_settings(spec: str) -> ModelSettings:
                 bedrock_cache_tool_definitions=True,
                 bedrock_cache_messages=True,
             )
-        case "azure" | "zen" | "bailian" | "deepseek":
-            # Azure/Zen/Bailian/DeepSeek use OpenAI chat completions — server-side
+        case "deepseek":
+            # DeepSeek — OpenAI 兼容接口
+            # 注意：DeepSeek v4 的思考模式与 tool_choice='required' 冲突（400
+            # "Thinking mode does not support this tool_choice"）。我们的 coordinator
+            # 和 solver 都是工具调用型 agent，pydantic-ai 在需要强制工具时会发
+            # tool_choice='required'，因此必须通过 reasoning_effort='none' 关闭思考。
+            return OpenAIChatModelSettings(
+                max_tokens=128_000,
+                openai_reasoning_effort="none",
+            )
+        case "azure" | "zen" | "bailian":
+            # Azure/Zen/Bailian use OpenAI chat completions — server-side
             # prompt caching is automatic, no explicit config needed. Set max_tokens
             # to avoid reserving the full context window.
             return OpenAIChatModelSettings(

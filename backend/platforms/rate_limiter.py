@@ -24,41 +24,28 @@ class RateLimiter:
         self._tokens: float = float(self.burst)
         self._last_refill: float = time.monotonic()
         self._lock: asyncio.Lock = asyncio.Lock()
-        self._waiters: asyncio.Queue[asyncio.Event] = asyncio.Queue()
 
     async def acquire(self) -> None:
         """Acquire a token, blocking if none available."""
         if self.rps <= 0:
             return  # disabled
 
-        async with self._lock:
-            self._refill()
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return
-
-        # No tokens available — wait for refill
-        event = asyncio.Event()
-        await self._waiters.put(event)
-        await event.wait()
-
-        async with self._lock:
-            self._refill()
-            self._tokens -= 1.0
+        while True:
+            async with self._lock:
+                self._refill()
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+            # No token available — wait one refill interval and retry.
+            # (Do NOT wait on an event that only fires on the next acquire();
+            #  that deadlocks once the burst is exhausted and all callers are blocked.)
+            await asyncio.sleep(1.0 / self.rps)
 
     def _refill(self) -> None:
         now = time.monotonic()
         elapsed = now - self._last_refill
         self._tokens = min(float(self.burst), self._tokens + elapsed * self.rps)
         self._last_refill = now
-
-        # Wake up any waiters that can now acquire
-        while not self._waiters.empty() and self._tokens >= 1.0:
-            try:
-                waiter = self._waiters.get_nowait()
-                waiter.set()
-            except asyncio.QueueEmpty:
-                break
 
     async def __aenter__(self) -> None:
         await self.acquire()

@@ -210,7 +210,7 @@ class Solver:
             )
 
             duration = time.monotonic() - t0
-            usage = result.usage()
+            usage = result.usage  # pydantic-ai 2.18+: RunUsage attribute, not a method
 
             self.cost_tracker.record(
                 self.agent_name, usage, self.model_id,

@@ -1,10 +1,9 @@
-"""Background CTFd poller — detects new and solved challenges every 5 seconds."""
+"""Background platform poller — detects new and solved challenges every 5 seconds."""
 
 import asyncio
 import logging
 from dataclasses import dataclass, field
-
-from backend.ctfd import CTFdClient
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +17,12 @@ class PollEvent:
 
 @dataclass
 class CTFdPoller:
-    """Polls CTFd every interval_s seconds, emits events for new/solved challenges."""
+    """Polls the platform every interval_s seconds, emits events for new/solved challenges.
 
-    ctfd: CTFdClient
+    Accepts any CTFd-style platform client (CTFdClient or PlatformAdapter).
+    """
+
+    ctfd: Any  # platform client with fetch_challenge_stubs() / fetch_solved_names()
     interval_s: float = 5.0
 
     _known_challenges: set[str] = field(default_factory=set)

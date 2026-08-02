@@ -81,18 +81,34 @@ class CTF2Client(PlatformClient):
         self._challenge_cache: dict[str, ChallengeInfo] = {}
         # Cache: compound_id -> CTF2Environment
         self._env_cache: dict[str, CTF2Environment] = {}
+        # Last API errors by path (for diagnostics)
+        self.last_errors: dict[str, dict[str, Any]] = {}
 
     # ── Factory ──────────────────────────────────────────────────────────────
 
     @classmethod
+    def from_settings(cls, settings: object) -> CTF2Client:
+        """Create a CTF2Client from the unified Settings object.
+
+        Reads platform_* fields from Settings (merged from config.yaml + .env).
+        """
+        return cls(
+            api_base_url=getattr(settings, "platform_api_base_url", "https://ctf2.dasctf.com"),
+            api_path=getattr(settings, "platform_api_path", "/api/open/v1"),
+            auth_token=getattr(settings, "platform_auth_credential", ""),
+            auth_type=getattr(settings, "platform_auth_type", "ApiKey"),
+            rate_limit_rps=getattr(settings, "rate_limit_rps", 5),
+        )
+
+    @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> CTF2Client:
-        """Create from a config dict (usually from config.yaml's platform section)."""
+        """Create from a config dict (usually from config.yaml's platform section).
+
+        Deprecated: prefer from_settings() which uses the unified Settings.
+        """
         if config is None:
-            import yaml
-            from pathlib import Path
-            with open(Path("config.yaml")) as f:
-                cfg = yaml.safe_load(f) or {}
-            config = cfg.get("platform", {})
+            from backend.config import Settings
+            return cls.from_settings(Settings())
 
         return cls(
             api_base_url=config.get("api_base_url", "https://ctf2.dasctf.com"),
@@ -124,7 +140,11 @@ class CTF2Client(PlatformClient):
         return self._client
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        """Make an API request with rate limiting and response parsing."""
+        """Make an API request with rate limiting and response parsing.
+
+        Returns parsed JSON. On 403/404, returns the error envelope instead of
+        raising, so callers can handle permissions/missing resources gracefully.
+        """
         url = self._build_url(path)
         async with self.rate_limiter:
             client = await self._ensure_client()
@@ -132,21 +152,58 @@ class CTF2Client(PlatformClient):
 
         if resp.status_code == 429:
             logger.warning("Rate limited on %s %s", method, path)
-            return {"success": False, "error": {"code": "RATE_LIMITED"}}
+            return {"success": False, "error": {"code": "RATE_LIMITED", "key": "errors.rate_limited"}}
 
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"success": False, "error": {"code": f"HTTP_{resp.status_code}", "key": resp.text[:200]}}
 
-        # Check for API-level error
-        if isinstance(data, dict) and data.get("success") is False:
-            err = data.get("error", {})
-            logger.warning("CTF2 API error: %s — %s", err.get("code"), err.get("key"))
-            return data
+        # Non-2xx responses — log and return envelope (don't raise)
+        if resp.status_code >= 400:
+            err = data.get("error", {}) if isinstance(data, dict) else {}
+            code = err.get("code", f"HTTP_{resp.status_code}")
+            logger.warning(
+                "CTF2 API %s %s → %s: %s",
+                method, path, resp.status_code, code,
+            )
+            # Track for diagnostics
+            self.last_errors[path] = {
+                "status": resp.status_code,
+                "code": code,
+                "key": err.get("key", ""),
+            }
+            return {"success": False, "error": err, "_http_status": resp.status_code}
 
         return data
 
+    def diagnostics(self) -> dict[str, Any]:
+        """Return API diagnostics: last errors and auth status.
+
+        Useful for surfacing why challenge enumeration returned nothing
+        (e.g. TEAM_MEMBERSHIP_REQUIRED on competition endpoints).
+        """
+        team_membership_needed = any(
+            e.get("code") == "TEAM_MEMBERSHIP_REQUIRED"
+            for e in self.last_errors.values()
+        )
+        return {
+            "auth_type": self.auth_type,
+            "token_configured": bool(self.auth_token),
+            "last_errors": dict(self.last_errors),
+            "team_membership_required": team_membership_needed,
+            "hint": (
+                "竞赛接口需要先加入队伍：请先在 CTF2 平台创建/加入参赛队伍，"
+                "否则竞赛题目无法枚举 (TEAM_MEMBERSHIP_REQUIRED)。"
+                if team_membership_needed else ""
+            ),
+        }
+
     async def _paginated_get(self, path: str, page_size: int = 100) -> list[dict[str, Any]]:
-        """GET a paginated endpoint, collecting all pages."""
+        """GET a paginated endpoint, collecting all pages.
+
+        Returns [] on permission errors (403) or missing endpoints (404).
+        """
         all_items: list[dict[str, Any]] = []
         page = 1
 
@@ -242,12 +299,19 @@ class CTF2Client(PlatformClient):
         """Fetch all visible challenges by traversing competitions and practice grounds.
 
         Returns challenges with compound IDs that encode parent context.
+
+        Note:
+        - Competition enumeration (competition → stages → challenges) is the primary
+          path and requires team membership.
+        - Practice grounds have NO bulk challenge list endpoint in the user API;
+          practice challenges are only fetched individually by ID. So practice is
+          only used to log discovered grounds (for diagnostics).
         """
         self._challenge_cache = {}
         all_challenges: list[ChallengeInfo] = []
         seen_names: set[str] = set()
 
-        # Strategy 1: Traverse competitions → stages → challenges
+        # Strategy 1: Traverse competitions → stages → challenges (primary path)
         try:
             competitions = await self.list_competitions()
             for comp in competitions:
@@ -286,42 +350,25 @@ class CTF2Client(PlatformClient):
         except Exception as e:
             logger.warning("Competition traversal failed: %s", e)
 
-        # Strategy 2: Traverse practice grounds → challenges
+        # Strategy 2: Discover practice grounds (informational only — no bulk list API)
         try:
             grounds = await self.list_practice_grounds()
-            for ground in grounds:
-                ground_id = ground.get("id", "")
-                ground_name = ground.get("name", "")
-                challenges = await self.list_practice_challenges(ground_id)
-                for ch in challenges:
-                    ch_id = ch.get("id", "")
-                    compound_id = _make_challenge_id("practice", ground_id, ch_id)
-                    name = ch.get("name", ch.get("title", "Unknown"))
-                    if name in seen_names:
-                        # Skip if already found via competition path
-                        continue
-                    seen_names.add(name)
-                    info = ChallengeInfo(
-                        id=compound_id,
-                        name=name,
-                        category=ch.get("category", ch.get("type", "")),
-                        description=ch.get("description", ""),
-                        value=ch.get("value", ch.get("points", 0)),
-                        tags=ch.get("tags", []),
-                        solved=ch.get("solved", False),
-                        connection_info=ch.get("connection_info", ""),
-                        raw={
-                            **ch,
-                            "_parent_type": "practice",
-                            "_parent_id": ground_id,
-                            "_ground_name": ground_name,
-                            "_challenge_id": ch_id,
-                        },
-                    )
-                    self._challenge_cache[compound_id] = info
-                    all_challenges.append(info)
+            if grounds:
+                logger.info(
+                    "Discovered %d practice ground(s) (e.g. %s). Practice has no bulk "
+                    "challenge list endpoint — challenges are fetched individually by ID.",
+                    len(grounds), grounds[0].get("name", "?"),
+                )
         except Exception as e:
-            logger.warning("Practice ground traversal failed: %s", e)
+            logger.warning("Practice ground discovery failed: %s", e)
+
+        if not all_challenges:
+            diag = self.diagnostics()
+            if diag.get("team_membership_required"):
+                logger.warning(
+                    "0 challenges fetched — 竞赛题目需先加入队伍 (TEAM_MEMBERSHIP_REQUIRED)。"
+                    "请在 CTF2 平台加入/创建参赛队伍后再试。"
+                )
 
         logger.info("Fetched %d challenges from CTF2", len(all_challenges))
         return all_challenges

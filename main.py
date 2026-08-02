@@ -36,8 +36,9 @@ def _parse_args() -> argparse.Namespace:
     engine = parser.add_argument_group("Engine Options")
     engine.add_argument("--ctfd-url", default=None, help="CTFd URL (overrides .env)")
     engine.add_argument("--ctfd-token", default=None, help="CTFd API token (overrides .env)")
-    engine.add_argument("--coordinator", default="claude", choices=["claude", "codex"],
-                        help="Coordinator backend (default: claude)")
+    engine.add_argument("--coordinator", default="auto",
+                        choices=["claude", "codex", "pydantic", "auto"],
+                        help="Coordinator backend (auto = detect; pydantic uses OpenAI-compatible models like DeepSeek)")
     engine.add_argument("--challenge", default=None,
                         help="Solve a single challenge directory (skip coordinator)")
     engine.add_argument("--challenges-dir", default="challenges",
@@ -67,20 +68,71 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _start_dashboard(port: int) -> threading.Thread:
+def _resolve_msg_port(args: argparse.Namespace) -> int:
+    """Resolve the operator message port (engine ↔ dashboard).
+
+    Priority: --msg-port > config.yaml/env operator_msg_port > 9400.
+    """
+    if getattr(args, "msg_port", None):
+        return args.msg_port
+    try:
+        from backend.config import Settings
+        return getattr(Settings(), "operator_msg_port", 9400)
+    except Exception:
+        return 9400
+
+
+def _dashboard_python() -> str:
+    """Pick the Python interpreter that has Streamlit installed.
+
+    Prefers the project venv (where streamlit is installed), falling back
+    to sys.executable. This avoids launching the dashboard with a global
+    Python that lacks streamlit.
+    """
+    import os
+    import sys
+
+    candidates = []
+    venv_py = Path(__file__).parent / ".venv"
+    if os.name == "nt":
+        candidates.append(venv_py / "Scripts" / "python.exe")
+    else:
+        candidates.append(venv_py / "bin" / "python")
+
+    candidates.append(Path(sys.executable))
+
+    for py in candidates:
+        if not py.exists():
+            continue
+        try:
+            import subprocess
+            code = subprocess.run(
+                [str(py), "-c", "import streamlit"],
+                capture_output=True, timeout=10,
+            ).returncode
+            if code == 0:
+                return str(py)
+        except Exception:
+            continue
+    return sys.executable
+
+
+def _start_dashboard(port: int, msg_port: int) -> threading.Thread:
     """Start the Streamlit dashboard in a background thread."""
     dashboard_path = Path(__file__).parent / "dashboard" / "app.py"
+    dashboard_python = _dashboard_python()
 
     def _run() -> None:
         cmd = [
-            sys.executable, "-m", "streamlit", "run",
+            dashboard_python, "-m", "streamlit", "run",
             str(dashboard_path),
             f"--server.port={port}",
             "--server.headless=true",
             "--server.runOnSave=false",
             "--client.toolbarMode=minimal",
         ]
-        env = {"COORDINATOR_MSG_PORT": str(args.msg_port) if args.msg_port else "9400"}
+        # Dashboard must ping the same port the engine listens on
+        env = {"COORDINATOR_MSG_PORT": str(msg_port)}
         subprocess.run(cmd, env={**__import__("os").environ, **env})
 
     thread = threading.Thread(target=_run, daemon=True, name="dashboard")
@@ -88,7 +140,7 @@ def _start_dashboard(port: int) -> threading.Thread:
     return thread
 
 
-def _run_engine(args: argparse.Namespace) -> None:
+def _run_engine(args: argparse.Namespace, msg_port: int) -> None:
     """Run the CTF solving engine via CLI entry point."""
     from backend.cli import main
 
@@ -113,8 +165,8 @@ def _run_engine(args: argparse.Namespace) -> None:
         click_args.extend(["--image", args.image])
     if args.no_submit:
         click_args.append("--no-submit")
-    if args.msg_port:
-        click_args.extend(["--msg-port", str(args.msg_port)])
+    # Always pass the resolved port so engine & dashboard stay in sync
+    click_args.extend(["--msg-port", str(msg_port)])
     if args.verbose:
         click_args.append("-v")
 
@@ -127,6 +179,7 @@ def main() -> None:
     """Main entry point."""
     global args
     args = _parse_args()
+    msg_port = _resolve_msg_port(args)
 
     if args.dashboard_only:
         # Start only the dashboard
@@ -134,7 +187,7 @@ def main() -> None:
         print(f"🚀 Starting dashboard on port {port}...")
         print(f"📊 Open http://localhost:{port} in your browser")
         print("⚠️  Make sure the engine is running separately!")
-        _start_dashboard(port)
+        _start_dashboard(port, msg_port)
         # Keep main thread alive
         try:
             threading.Event().wait()
@@ -146,12 +199,12 @@ def main() -> None:
         # Start dashboard in background, then engine
         port = args.dashboard_port or 8501
         print(f"🚀 Starting dashboard on port {port}...")
-        _start_dashboard(port)
+        _start_dashboard(port, msg_port)
         print(f"📊 Dashboard: http://localhost:{port}")
 
     # Run the engine
     try:
-        _run_engine(args)
+        _run_engine(args, msg_port)
     except KeyboardInterrupt:
         print("\n👋 Engine stopped.")
     except Exception as e:

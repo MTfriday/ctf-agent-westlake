@@ -154,22 +154,29 @@ python main.py --dashboard
 
 ## Configuration
 
-### config.yaml (recommended)
+### 配置设计（单一真相源）
 
-All settings centralized in `config.yaml`:
+配置采用 **`config.yaml`（非敏感结构）+ `.env`（敏感凭证）** 双层设计，
+由 `Settings` 统一合并，优先级：**环境变量 > .env > config.yaml > 默认值**。
+
+### config.yaml（非敏感，可提交 git）
 
 ```yaml
 platform:
-  type: generic  # "generic" or "ctfd"
-  api_base_url: "https://competition-api.example.com"
-  auth_type: "Bearer"
-  endpoints:
-    list_challenges: "/api/challenges"
-    submit_flag: "/api/flag"
+  type: ctf2            # "generic" | "ctfd" | "ctf2" | "gzctf"
+  auth_type: "ApiKey"
+  api_base_url: "https://ctf2.dasctf.com"
+  api_path: "/api/open/v1"
+  # auth_credential: "" # SECRET — 不要写这里！从 .env 的 PLATFORM_AUTH_CREDENTIAL 读取
 
 solver:
   max_concurrent_challenges: 10
   max_attempts_per_challenge: 3
+  models: ""            # 逗号分隔模型规格，留空=自动检测
+  # Coordinator 后端: "claude" | "codex" | "pydantic" | "auto"
+  # pydantic 可用任意 OpenAI 兼容模型（DeepSeek/百炼），无需 claude/codex CLI
+  coordinator: "auto"
+  coordinator_model: "" # 如 "deepseek/deepseek-v4-flash"（仅 pydantic 后端生效）
 
 flag:
   pattern: ""  # Custom regex, e.g. "CTF\\{[^}]+\\}"
@@ -180,21 +187,60 @@ rate_limit:
   requests_per_second: 5
 ```
 
-### .env
+### 平台选择
+
+`platform.type` 决定使用哪个平台客户端，运行时自动适配：
+
+| type | 客户端 | 说明 |
+|------|--------|------|
+| `ctf2` | CTF2Client + PlatformAdapter | ctf2.dasctf.com 专用 |
+| `gzctf` | GZCTFClient + PlatformAdapter | GZCTF 平台（150.158.131.227:65534 等）|
+| `generic` | GenericRestClient + PlatformAdapter | 任意 REST API 平台 |
+| `ctfd` | CTFdClient | 原 CTFd 路径 |
+
+**CTF2 注意**：竞赛题目（竞赛→阶段→题目）需要账号**先加入参赛队伍**，否则返回 `TEAM_MEMBERSHIP_REQUIRED`（403）。练习场当前用户 API 无批量题目列表端点，题目需按 ID 单独获取。
+
+**GZCTF 注意**：
+- 凭据从 `.env` 读取：`GZCTF_TOKEN`（推荐，`Authorization: Bearer`）或 `GZCTF_USERNAME` / `GZCTF_PASSWORD`（会话登录）
+- 平台 URL 在 `config.yaml` 的 `platform.api_base_url` 设置（如 `http://150.158.131.227:65534`）
+- 题目列表（`GET /api/game/{id}/details`）要求账号**先加入比赛队伍**，否则返回 403
+- 动态容器题目通过 `POST /api/game/{id}/container/{cid}` 创建实例（`instanceEntry` 为连接信息）
+- Flag 提交为两段式：提交后拿 submitId 再查询状态，`Accepted` 即正确
+
+### Coordinator 选择
+
+`--coordinator` / `solver.coordinator` 支持：
+- `pydantic`：用任意 OpenAI 兼容模型（DeepSeek/百炼），**无需 claude/codex CLI**
+- `claude`：Claude Agent SDK
+- `codex`：Codex CLI
+- `auto`（默认）：自动选择，无 claude/codex 时回退到 pydantic
+
+### .env（敏感凭证，不提交 git）
 
 ```env
-CTFD_URL=https://ctf.example.com
+# 平台认证凭证（根据 config.yaml 的 platform.type 使用）
+PLATFORM_AUTH_CREDENTIAL=ctf2_your_token_here   # CTF2 / 通用平台
+GZCTF_TOKEN=your_gzctf_token_here               # GZCTF 模式（推荐）
+GZCTF_USERNAME=your_username                    # GZCTF 会话登录（可选）
+GZCTF_PASSWORD=your_password                    # GZCTF 会话登录（可选）
+CTFD_URL=https://ctf.example.com                # CTFd 模式
 CTFD_TOKEN=ctfd_your_token
+
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...
+
+# DeepSeek — OpenAI compatible
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 # 阿里百炼 (Alibaba Bailian) — OpenAI compatible
 BAILIAN_API_KEY=sk-...
 BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
-All settings can also be passed as environment variables or CLI flags.
+All settings can also be passed as environment variables or CLI flags
+(env vars override both `.env` and `config.yaml`).
 
 ### Using Alibaba Bailian
 
@@ -237,6 +283,8 @@ ctf-agent-westlake/
 │   ├── platforms/       # Abstract platform client layer
 │   │   ├── base.py          # PlatformClient abstract interface
 │   │   ├── ctfd_adapter.py  # CTFd adapter (wraps existing CTFdClient)
+│   │   ├── ctf2_client.py   # CTF2 platform client (ctf2.dasctf.com)
+│   │   ├── gzctf_client.py  # GZCTF platform client
 │   │   ├── generic.py       # Generic REST client for any platform
 │   │   └── rate_limiter.py  # Token-bucket rate limiter
 │   ├── tools/           # Solver tool implementations

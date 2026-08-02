@@ -6,8 +6,34 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TERM=xterm
 
+# ── 镜像源（加速 apt / pip 下载）──────────────────────────────────────────────
+# apt: 把 archive.ubuntu.com / security.ubuntu.com 替换为清华镜像
+#   （南京大学 mirror.nju.edu.cn 在高并发下载下会批量返回 502，已弃用）
+# 用 http（基础镜像若缺 ca-certificates，https apt update 会失败）
+RUN sed -i \
+        's|http://archive.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g; \
+         s|https://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; \
+         s|http://security.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g; \
+         s|https://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' \
+        /etc/apt/sources.list \
+    && cat /etc/apt/sources.list
+
+# apt 重试/超时/限并行配置：镜像源偶发断连时自动重试，避免一次性批量失败
+RUN printf '%s\n' \
+        'Acquire::Retries "6";' \
+        'Acquire::http::Timeout "120";' \
+        'Acquire::https::Timeout "120";' \
+        'Acquire::http::MaxParallel "3";' \
+        > /etc/apt/apt.conf.d/99ctf-mirror \
+    && cat /etc/apt/apt.conf.d/99ctf-mirror
+
+# pip: 全局指向清华 PyPI 镜像（pip 自带 CA，https 可用）
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
 # ── System packages ───────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y \
+# --fix-missing：个别包下载失败时跳过而非整体失败（配合上方 Retries 重试）
+RUN apt-get update && apt-get install -y --fix-missing \
     # Networking
     netcat-openbsd curl wget nmap \
     # Binary analysis
@@ -112,8 +138,11 @@ RUN pip3 install --no-cache-dir \
     pyghidra
 
 # ── PyTorch (CPU-only) + Keras ────────────────────────────────────────────────
-RUN pip3 install --no-cache-dir --ignore-installed sympy \
-    torch --index-url https://download.pytorch.org/whl/cpu \
+# 优先用清华 pytorch 镜像，失败则回退官方源
+RUN (pip3 install --no-cache-dir --ignore-installed sympy \
+        torch --index-url https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cpu \
+     || pip3 install --no-cache-dir --ignore-installed sympy \
+        torch --index-url https://download.pytorch.org/whl/cpu) \
     && pip3 install --no-cache-dir keras
 
 # ── RsaCtfTool (catch-all automated RSA/factoring attacks) ────────────────────

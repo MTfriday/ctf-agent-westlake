@@ -60,7 +60,18 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
         "cached_input": 0.02,
         "output": 0.60,
     },
-    # DeepSeek 系列定价
+    # DeepSeek 系列定价（新版 v4：flash 便宜为主，pro 更贵仅复杂题用）
+    "deepseek-v4-flash": {
+        "input": 0.27,
+        "cached_input": 0.027,
+        "output": 1.10,
+    },
+    "deepseek-v4-pro": {
+        "input": 1.10,
+        "cached_input": 0.11,
+        "output": 4.40,
+    },
+    # 旧版模型名（已下线，保留作别名）
     "deepseek-chat": {
         "input": 0.27,
         "cached_input": 0.027,

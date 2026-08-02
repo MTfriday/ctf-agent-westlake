@@ -16,6 +16,38 @@ from backend.models import resolve_model_specs
 console = Console()
 
 
+def _platform_label(settings: Settings) -> str:
+    """Human-readable label for the active platform."""
+    ptype = getattr(settings, "platform_type", "ctfd")
+    if ptype == "ctf2":
+        return f"CTF2 ({settings.platform_api_base_url}{settings.platform_api_path})"
+    if ptype == "gzctf":
+        return f"GZCTF ({settings.platform_api_base_url})"
+    if ptype == "generic":
+        return f"Generic ({settings.platform_api_base_url})"
+    return f"CTFd ({settings.ctfd_url})"
+
+
+def _resolve_coordinator(settings: Settings, cli_value: str) -> str:
+    """Resolve coordinator backend. Priority: CLI > settings > auto-detect.
+
+    Auto-detect:
+      - If claude/codex CLI available → use it (unless user prefers pydantic)
+      - Otherwise → "pydantic" (works with DeepSeek/Bailian via OpenAI-compatible API)
+    """
+    from backend.models import _cli_available
+
+    if cli_value != "auto":
+        return cli_value
+
+    configured = getattr(settings, "coordinator", "auto")
+    if configured != "auto":
+        return configured
+
+    # Auto-detect: prefer pydantic (OpenAI-compatible) since it needs no CLI
+    return "pydantic"
+
+
 def _setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -36,10 +68,10 @@ def _setup_logging(verbose: bool = False) -> None:
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
 @click.option("--no-submit", is_flag=True, help="Dry run — don't submit flags")
-@click.option("--coordinator-model", default=None, help="Model for coordinator (default: claude-opus-4-6)")
-@click.option("--coordinator", default="claude", type=click.Choice(["claude", "codex"]), help="Coordinator backend")
+@click.option("--coordinator-model", default=None, help="Model for coordinator (pydantic backend only)")
+@click.option("--coordinator", default="auto", type=click.Choice(["claude", "codex", "pydantic", "auto"]), help="Coordinator backend (auto = detect)")
 @click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
-@click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
+@click.option("--msg-port", default=None, type=int, help="Operator message port (default: from config, 9400)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
     ctfd_url: str | None,
@@ -70,11 +102,19 @@ def main(
 
     model_specs = resolve_model_specs(settings=settings, cli_models=list(models) if models else None)
 
+    # Resolve coordinator backend
+    coordinator = _resolve_coordinator(settings, coordinator)
+
+    # Resolve operator message port (engine ↔ dashboard), must match dashboard
+    if msg_port is None:
+        msg_port = getattr(settings, "operator_msg_port", 9400)
+
     console.print("[bold]CTF Agent v2[/bold]")
-    console.print(f"  CTFd: {settings.ctfd_url}")
+    console.print(f"  Platform: {_platform_label(settings)}")
     console.print(f"  Models: {', '.join(model_specs)}")
     console.print(f"  Image: {settings.sandbox_image}")
     console.print(f"  Max challenges: {max_challenges}")
+    console.print(f"  Coordinator: {coordinator}")
     console.print()
 
     if challenge:
@@ -110,12 +150,8 @@ async def _run_single(
     meta = ChallengeMeta.from_yaml(meta_path)
     console.print(f"[bold]Challenge:[/bold] {meta.name} ({meta.category}, {meta.value} pts)")
 
-    ctfd = CTFdClient(
-        base_url=settings.ctfd_url,
-        token=settings.ctfd_token,
-        username=settings.ctfd_user,
-        password=settings.ctfd_pass,
-    )
+    from backend.agents.coordinator_loop import _build_platform_client
+    ctfd = _build_platform_client(settings)
     cost_tracker = CostTracker()
 
     swarm = ChallengeSwarm(
@@ -144,6 +180,33 @@ async def _run_single(
         await ctfd.close()
 
 
+async def _ensure_sandbox_image(settings: Settings) -> None:
+    """Pre-flight: verify the sandbox Docker image exists; warn clearly if not.
+
+    Without this image every solver fails at container start with
+    `[404] No such image: <image>`, which looks like the engine is stuck.
+    """
+    image = getattr(settings, "sandbox_image", "ctf-sandbox")
+    try:
+        import aiodocker
+        docker = aiodocker.Docker()
+        try:
+            await docker.images.inspect(image)
+            return
+        except Exception:
+            pass
+        finally:
+            await docker.close()
+    except Exception:
+        return  # can't reach Docker — sandbox code will surface the real error
+
+    console.print(
+        f"[bold red]⚠ Sandbox image '{image}' not found in Docker.[/bold red]\n"
+        "  Solver swarms will fail to start containers. Build it first:\n"
+        "  [cyan]docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .[/cyan]\n"
+    )
+
+
 async def _run_coordinator(
     settings: Settings,
     model_specs: list[str],
@@ -157,6 +220,7 @@ async def _run_coordinator(
     """Run the full coordinator (continuous until Ctrl+C)."""
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
+    await _ensure_sandbox_image(settings)
     max_containers = max_challenges * len(model_specs)
     configure_semaphore(max_containers)
     await cleanup_orphan_containers()
@@ -165,6 +229,16 @@ async def _run_coordinator(
     if coordinator_backend == "codex":
         from backend.agents.codex_coordinator import run_codex_coordinator
         results = await run_codex_coordinator(
+            settings=settings,
+            model_specs=model_specs,
+            challenges_root=challenges_dir,
+            no_submit=no_submit,
+            coordinator_model=coordinator_model,
+            msg_port=msg_port,
+        )
+    elif coordinator_backend == "pydantic":
+        from backend.agents.pydantic_coordinator import run_pydantic_coordinator
+        results = await run_pydantic_coordinator(
             settings=settings,
             model_specs=model_specs,
             challenges_root=challenges_dir,
