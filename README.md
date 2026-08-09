@@ -136,11 +136,11 @@ python main.py --dashboard
 - **Cross-solver insights** — findings shared between models via message bus
 - **Docker sandboxes** — isolated containers with full CTF tooling
 - **Operator messaging** — send hints to running solvers mid-competition
-- **📊 Human-Machine Dashboard** — Streamlit-based real-time visualization:
+- **📊 Web Cockpit (Aemeath)** — Next.js human-machine cockpit (P6, replacing the old Streamlit dashboard):
+  - Blackboard panel (facts / dead-ends / intents)
+  - Orchestrator dashboard (mode badge, lock, OODA log)
+  - Real-time SSE event stream
   - Challenge overview with status cards (solved/in-progress/failed)
-  - Per-solver trace viewer with tool call history
-  - Send hints, pause/resume/kill tasks
-  - Dynamic settings adjustment
 - **🧩 Type-Specific Solvers** — automatic challenge classification:
   - Reverse Engineering (angr, pyghidra, radare2)
   - Binary Exploitation (pwntools, ROPgadget, checksec)
@@ -254,25 +254,17 @@ uv run ctf-solve --models bailian/qwen-max ...
 
 Supported Bailian models: `qwen-max`, `qwen-plus`, `qwen-turbo`
 
-## Dashboard
+## Dashboard (Web Cockpit — P6)
 
-The Streamlit dashboard provides real-time competition visualization:
+The legacy **Streamlit** dashboard has been **removed**. A Next.js human-machine
+cockpit (`BlackboardPanel` + `OrchestratorDashboard`) is introduced in P6
+(module five of the Aemeath blueprint), consuming the adapter's `/api/*` and
+SSE stream.
 
 ```bash
-# Start with engine
-python main.py --dashboard
-
-# Start standalone (engine must be running separately)
-python main.py --dashboard-only
+# Engine + adapter (provides /api/* + SSE for the cockpit)
+python -m adapter
 ```
-
-**Dashboard features:**
-
-- Challenge cards with status, category, and step count
-- Filter by status (solved/analyzing/failed)
-- Per-solver trace viewer with full tool call history
-- Human intervention: send hints, pause/resume/kill tasks
-- Global settings: concurrency, attempts, rate limits
 
 ## Project Structure
 
@@ -301,8 +293,12 @@ ctf-agent-westlake/
 │   ├── web_solver.py
 │   ├── crypto_solver.py
 │   └── misc_solver.py
-├── dashboard/           # Streamlit dashboard
-│   └── app.py
+├── dashboard/           # (legacy Streamlit removed; cockpit moves to P6 Next.js)
+├── adapter/             # Aemeath execution layer (FastAPI: /api/*, SSE)
+├── src/
+│   ├── blackboard/      # Shared knowledge blackboard (SQLite WAL)
+│   └── orchestrator/    # OODA loop + mode routing (swarm/orchestrated/hybrid)
+├── prompts/             # Aemeath system prompt (cognitive layer)
 ├── sandbox/             # Docker sandbox definition
 ├── tests/               # Test suite
 ├── config.yaml          # Main configuration

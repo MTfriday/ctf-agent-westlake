@@ -56,10 +56,10 @@ def _parse_args() -> argparse.Namespace:
     engine.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose logging")
 
-    # Dashboard options
+    # Dashboard options（P6 Next.js 驾驶舱接入后启用）
     dashboard = parser.add_argument_group("Dashboard Options")
     dashboard.add_argument("--dashboard", action="store_true",
-                           help="Launch the Streamlit dashboard alongside the engine")
+                           help="Launch the web dashboard alongside the engine (P6 cockpit)")
     dashboard.add_argument("--dashboard-only", action="store_true",
                            help="Launch only the dashboard (engine must be running separately)")
     dashboard.add_argument("--dashboard-port", default=8501, type=int,
@@ -82,58 +82,25 @@ def _resolve_msg_port(args: argparse.Namespace) -> int:
         return 9400
 
 
-def _dashboard_python() -> str:
-    """Pick the Python interpreter that has Streamlit installed.
-
-    Prefers the project venv (where streamlit is installed), falling back
-    to sys.executable. This avoids launching the dashboard with a global
-    Python that lacks streamlit.
-    """
-    import os
-    import sys
-
-    candidates = []
-    venv_py = Path(__file__).parent / ".venv"
-    if os.name == "nt":
-        candidates.append(venv_py / "Scripts" / "python.exe")
-    else:
-        candidates.append(venv_py / "bin" / "python")
-
-    candidates.append(Path(sys.executable))
-
-    for py in candidates:
-        if not py.exists():
-            continue
-        try:
-            import subprocess
-            code = subprocess.run(
-                [str(py), "-c", "import streamlit"],
-                capture_output=True, timeout=10,
-            ).returncode
-            if code == 0:
-                return str(py)
-        except Exception:
-            continue
-    return sys.executable
-
-
 def _start_dashboard(port: int, msg_port: int) -> threading.Thread:
-    """Start the Streamlit dashboard in a background thread."""
-    dashboard_path = Path(__file__).parent / "dashboard" / "app.py"
-    dashboard_python = _dashboard_python()
+    """启动 Web 驾驶舱（P6 Next.js 前端接入前为占位）。
+
+    Streamlit 版已移除。若存在 dashboard/server.py（P6 的启动器）则运行之，
+    否则打印占位提示，不启动任何服务。
+    """
+    server_py = Path(__file__).parent / "dashboard" / "server.py"
 
     def _run() -> None:
-        cmd = [
-            dashboard_python, "-m", "streamlit", "run",
-            str(dashboard_path),
-            f"--server.port={port}",
-            "--server.headless=true",
-            "--server.runOnSave=false",
-            "--client.toolbarMode=minimal",
-        ]
-        # Dashboard must ping the same port the engine listens on
-        env = {"COORDINATOR_MSG_PORT": str(msg_port)}
-        subprocess.run(cmd, env={**__import__("os").environ, **env})
+        if not server_py.exists():
+            print("⚠️  Web 驾驶舱尚未接入（P6 Next.js 前端实现后自动启用）。")
+            return
+        import os
+
+        env = {**os.environ, "COORDINATOR_MSG_PORT": str(msg_port)}
+        subprocess.run(
+            [sys.executable, str(server_py), "--port", str(port), "--msg-port", str(msg_port)],
+            env=env,
+        )
 
     thread = threading.Thread(target=_run, daemon=True, name="dashboard")
     thread.start()

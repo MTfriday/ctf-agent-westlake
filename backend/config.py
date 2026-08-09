@@ -72,6 +72,23 @@ class YamlConfigSource(PydanticBaseSettingsSource):
             "level": "logging_level",
             "trace_enabled": "trace_enabled",
         },
+        "blackboard": {
+            "db_path": "blackboard_db_path",
+        },
+        "adapter": {
+            "host": "adapter_host",
+            "port": "adapter_port",
+            "engine_backend": "adapter_engine_backend",
+        },
+        "orchestrator": {
+            "enabled": "orchestrator_enabled",
+            "main_model": "orchestrator_main_model",
+            "router_model": "orchestrator_router_model",
+            "max_intents": "orchestrator_max_intents",
+            "intent_timeout_seconds": "orchestrator_intent_timeout_seconds",
+            "observe_interval_seconds": "orchestrator_observe_interval_seconds",
+            "max_rounds": "orchestrator_max_rounds",
+        },
     }
 
     def __init__(self, settings_cls: type[BaseSettings], yaml_path: str = "config.yaml") -> None:
@@ -192,6 +209,23 @@ class Settings(BaseSettings):
     # ========== 日志（config.yaml logging.*）==========
     logging_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     trace_enabled: bool = True
+
+    # ========== Aemeath 共享黑板（config.yaml blackboard.*）==========
+    blackboard_db_path: str = "data/blackboard.db"
+
+    # ========== Aemeath 执行层适配器（config.yaml adapter.*）==========
+    adapter_host: str = "127.0.0.1"
+    adapter_port: int = 8001
+    adapter_engine_backend: str = "swarm"  # "swarm" | "mock"
+
+    # ========== Aemeath 总控（config.yaml orchestrator.*）==========
+    orchestrator_enabled: bool = True
+    orchestrator_main_model: str = "qwen3.7-max"
+    orchestrator_router_model: str = "qwen3.6-flash"
+    orchestrator_max_intents: int = 4
+    orchestrator_intent_timeout_seconds: int = 120
+    orchestrator_observe_interval_seconds: int = 10
+    orchestrator_max_rounds: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

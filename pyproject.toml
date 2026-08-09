@@ -15,6 +15,10 @@ dependencies = [
     "rich",
     "click",
     "markdownify",
+    # Aemeath 执行层适配器（FastAPI + SSE）
+    "fastapi",
+    "uvicorn[standard]",
+    "sse-starlette",
 ]
 
 [project.scripts]

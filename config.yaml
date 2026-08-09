@@ -91,6 +91,31 @@ dashboard:
   port: 8501
   refresh_interval_seconds: 3
 
+# ========== Aemeath 执行层适配器 ==========
+adapter:
+  host: "127.0.0.1"
+  port: 8001
+  # 引擎后端: "swarm"（真实求解）| "mock"（联调/测试，无需平台与 LLM）
+  engine_backend: "swarm"
+
+# ========== Aemeath 总控（OODA 循环 + 模式路由）==========
+orchestrator:
+  enabled: true
+  # 主力规划模型（百炼 qwen；未配 BAILIAN_API_KEY 时自动回退规则）
+  main_model: "qwen3.7-max"
+  # 模式路由模型
+  router_model: "qwen3.6-flash"
+  max_intents: 4                  # 每轮最多生成 Intent 数
+  intent_timeout_seconds: 120     # Intent 执行超时（秒）
+  observe_interval_seconds: 10    # OODA 轮询间隔（秒）
+  max_rounds: 20                  # 最大循环轮数
+
+# ========== Aemeath 共享黑板 ==========
+blackboard:
+  # SQLite 数据库路径（环境变量 AEMEATH_BLACKBOARD_PATH 优先）
+  # 容器化时通过 Docker Volume 挂载此路径，确保容器间共享
+  db_path: "data/blackboard.db"
+
 # ========== 日志 ==========
 logging:
   level: "INFO"                              # DEBUG | INFO | WARNING | ERROR

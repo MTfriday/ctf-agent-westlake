@@ -22,6 +22,14 @@ build/
 uv.lock
 
 # Runtime
+ref/
 workspace/
 codex-schema-*/
 .claude/scheduled_tasks.lock
+
+# Runtime data (blackboard db / muteki meta / uploads)
+data/
+
+# Backups & scratch
+*.bak
+tmp_*.py

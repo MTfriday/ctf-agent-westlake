@@ -39,7 +39,7 @@
 
 ### 2.3 人机协同仪表盘 (dashboard/)
 
-- 使用 Streamlit 或 Gradio 实现Web界面。
+- 使用 Next.js 实现 Web 驾驶舱（Aemeath 模块五，替代旧 Streamlit），通过 SSE 实时展示黑板与总控状态。
 - 主页面：实时显示所有题目卡片（状态、类型、最近日志摘要），支持手动刷新。
 - 题目详情页：展示完整解题对话历史/日志流。
 - 人工干预：可对任一题目发送自然语言提示、上传脚本、调整优先级、暂停/继续/终止任务。
@@ -99,6 +99,6 @@ ctf_autosolver/
 2. 实现核心模块（api_client, task_manager, sandbox）。
 3. 实现求解器基类和题型路由器，并与LLM集成。
 4. 实现各题型求解器，至少集成2个专用工具。
-5. 实现Streamlit/Gradio仪表盘。
+5. 实现 Aemeath Web 驾驶舱（Next.js + SSE）。
 6. 编写测试脚本并确保通过。
 7. 输出最终的项目代码和说明文档。
