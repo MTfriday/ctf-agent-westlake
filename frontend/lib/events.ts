@@ -762,10 +762,20 @@ export function reduce(prev: DeckState, ev: MutekiEvent): DeckState {
       pushChat(s, { role: "agent", solverId: l.solverId, kind: "tool", content: `▶ ${p.tool ?? "tool"}`, ts: ev.ts });
       break;
     }
+    case EventType.TOOL_CALL_ARGS: {
+      const l = lane(s, ev.solver_id);
+      const args = (p.args ?? "").toString();
+      if (args) {
+        const preview = args.split("\n").slice(0, 8).join("\n").slice(0, 1000);
+        pushChat(s, { role: "agent", solverId: l.solverId, kind: "tool", content: `  ⤷ ${preview}`, ts: ev.ts });
+      }
+      break;
+    }
     case EventType.TOOL_CALL_RESULT: {
       const l = lane(s, ev.solver_id);
-      const res = p.result || {};
-      const cond = (res.condensed ?? "").toString();
+      const res = p.result ?? "";
+      // 兼容字符串（swarm trace 直接传文本）与对象（{condensed}）两种形态
+      const cond = (typeof res === "string" ? res : (res.condensed ?? "")).toString();
       const head = cond.split("\n")[0] || "(result)";
       // keep a fuller preview in the transcript (up to ~6 lines / 800 chars) so a
       // tool's output isn't reduced to a single line — the timeline redesign lets

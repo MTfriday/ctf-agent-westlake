@@ -40,7 +40,7 @@ llm:
 
 # ========== 求解器配置 ==========
 solver:
-  max_concurrent_challenges: 10              # 最大并发解题数
+  max_concurrent_challenges: 2              # 最大并发解题数
   max_attempts_per_challenge: 3              # 每题最多尝试次数
   model_temperature: 0.7                     # 模型温度
   retry_delay_seconds: 30                    # 重试间隔
@@ -67,7 +67,7 @@ flag:
 # ========== 速率限制 ==========
 rate_limit:
   enabled: true
-  requests_per_second: 5                     # 每秒最大请求数
+  requests_per_second: 3                     # 每秒最大请求数
   burst_size: 10                             # 突发允许量
 
 # ========== 沙箱配置 ==========
@@ -94,9 +94,13 @@ dashboard:
 # ========== Aemeath 执行层适配器 ==========
 adapter:
   host: "127.0.0.1"
-  port: 8001
+  port: 12345   # 8001 在部分 Windows 被排除端口段保留（WinError 10013）无法 bind，故用 12345
   # 引擎后端: "swarm"（真实求解）| "mock"（联调/测试，无需平台与 LLM）
   engine_backend: "swarm"
+  # 全自动求解: true=启动后自动扫描未解出题目并发起求解（跳过已解出，避免浪费 token）
+  auto_solve: true
+  # 自动求解轮询间隔（秒）——定期检测平台新题 / 解出状态
+  auto_poll_interval: 20
 
 # ========== Aemeath 总控（OODA 循环 + 模式路由）==========
 orchestrator:

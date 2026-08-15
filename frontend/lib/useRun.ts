@@ -189,7 +189,9 @@ export function useRun(runId: string) {
       const ticket = await authTicket();
       if (cancelled) return;
       const qs = ticket ? `?ticket=${encodeURIComponent(ticket)}` : "";
-      const es = new EventSource(`${API}/api/runs/${runId}/events${qs}`);
+      // runId 可能是含特殊字符的 challenge 名（如 "What is NC?" 的 `?`）——
+      // 必须 URL 编码，否则 `?` 会被当作 query 起始符截断路径，SSE 永远拿不到历史
+      const es = new EventSource(`${API}/api/runs/${encodeURIComponent(runId)}/events${qs}`);
       esRef.current = es;
       es.onopen = () => setConnected(true);
       es.onerror = () => setConnected(false);
@@ -213,7 +215,7 @@ export function useRun(runId: string) {
       // waiting for the runId state update to flush (avoids a one-render race
       // where a draft is promoted to a real run id at send time).
       const target = overrideRunId || runId;
-      const res = await apiFetch(`/api/runs/${target}/start`, {
+      const res = await apiFetch(`/api/runs/${encodeURIComponent(target)}/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -266,7 +268,7 @@ export function useRun(runId: string) {
                /\b(ssh|vps|反弹|reverse[- ]?shell|root@|端口转发|port[- ]?forward|credential|凭证|账号|密码|password|跳板|中转)\b/i.test(text)) {
         body.standing = true;
       }
-      await apiFetch(`/api/runs/${runId}/hitl`, {
+      await apiFetch(`/api/runs/${encodeURIComponent(runId)}/hitl`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -282,7 +284,7 @@ export function useRun(runId: string) {
     async (text?: string) => {
       const body: Record<string, unknown> = {};
       if (text && text.trim()) body.challenge = { description: text.trim() };
-      await apiFetch(`/api/runs/${runId}/resolve`, {
+      await apiFetch(`/api/runs/${encodeURIComponent(runId)}/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -356,7 +358,7 @@ export async function uploadFiles(
   const fd = new FormData();
   Array.from(files).forEach((f) => fd.append("files", f));
   try {
-    const r = await apiFetch(`/api/runs/${runId}/uploads`, {
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/uploads`, {
       method: "POST",
       body: fd,
     });
@@ -387,7 +389,7 @@ export async function patchRun(
   patch: { pinned?: boolean; archived?: boolean; name?: string; folder_id?: string | null; order?: number }
 ): Promise<boolean> {
   try {
-    const r = await apiFetch(`/api/runs/${runId}`, {
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
@@ -401,7 +403,7 @@ export async function patchRun(
 /** Hard-delete a run (irreversible — the caller confirms first). */
 export async function deleteRun(runId: string): Promise<boolean> {
   try {
-    const r = await apiFetch(`/api/runs/${runId}`, { method: "DELETE" });
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
     return r.ok;
   } catch {
     return false;
@@ -411,7 +413,7 @@ export async function deleteRun(runId: string): Promise<boolean> {
 /** Open the run's workspace dir in the host file manager (operator-local). */
 export async function openWorkspace(runId: string): Promise<boolean> {
   try {
-    const r = await apiFetch(`/api/runs/${runId}/open`, { method: "POST" });
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/open`, { method: "POST" });
     const j = await r.json().catch(() => ({}));
     return !!j.ok;
   } catch {
@@ -931,7 +933,7 @@ export async function putRuntimeEnvironment(
  *  (omit engine → coordinator picks heterogeneity-aware). */
 export async function spawnWorker(runId: string, engine?: string): Promise<boolean> {
   try {
-    const r = await apiFetch(`/api/runs/${runId}/workers`, {
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/workers`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(engine ? { engine } : {}),
@@ -946,7 +948,7 @@ export async function spawnWorker(runId: string, engine?: string): Promise<boole
 /** Operator runtime control: stop a specific worker by its solver_id. */
 export async function killWorker(runId: string, solverId: string): Promise<boolean> {
   try {
-    const r = await apiFetch(`/api/runs/${runId}/workers`, {
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/workers`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ solver_id: solverId }),

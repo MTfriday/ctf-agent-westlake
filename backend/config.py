@@ -215,8 +215,14 @@ class Settings(BaseSettings):
 
     # ========== Aemeath 执行层适配器（config.yaml adapter.*）==========
     adapter_host: str = "127.0.0.1"
-    adapter_port: int = 8001
+    # 注意：8001 在部分 Windows 上落在 Hyper-V/WSL 排除端口段（WinError 10013）无法 bind，
+    # 故默认用 12345（可用端口）。如需其他端口改 config.yaml adapter.port。
+    adapter_port: int = 12345
     adapter_engine_backend: str = "swarm"  # "swarm" | "mock"
+    # 全自动求解：启动后自动扫描未解出题目并发起求解（跳过已解出，避免浪费 token）
+    adapter_auto_solve: bool = True
+    # 自动求解轮询间隔（秒）——定期检测平台新题/解出状态
+    adapter_auto_poll_interval: float = 20.0
 
     # ========== Aemeath 总控（config.yaml orchestrator.*）==========
     orchestrator_enabled: bool = True

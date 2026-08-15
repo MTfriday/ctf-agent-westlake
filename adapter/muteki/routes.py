@@ -62,6 +62,7 @@ def _auth(runtime: SolverRuntime = Depends(get_runtime)):
 
 
 def _tickets(runtime: SolverRuntime = Depends(get_runtime)):
+    _auth(runtime)  # 确保 muteki_auth / muteki_tickets 已初始化（否则首调会 500）
     return runtime.muteki_tickets
 
 
@@ -92,7 +93,10 @@ async def auth_login(request: Request, runtime: SolverRuntime = Depends(get_runt
 @router.get("/api/auth/me")
 async def auth_me(request: Request, runtime: SolverRuntime = Depends(get_runtime)) -> Any:
     cfg = _auth(runtime)
-    return {"authenticated": True, "auth_required": cfg.enabled, "in_container": False}
+    # Aemeath 后端（SwarmEngineBackend）始终通过 Docker 容器执行 worker：
+    # 题目附件自动放入 data/uploads/{run_id}/ 供容器挂载，本地执行不存在。
+    # 因此前端「隔离/本地」切换必须锁定为隔离（in_container=True）。
+    return {"authenticated": True, "auth_required": cfg.enabled, "in_container": True}
 
 
 @router.post("/api/auth/ticket")

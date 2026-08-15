@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from backend.agents.solver import Solver
 from backend.cost_tracker import CostTracker
@@ -55,6 +55,9 @@ class ChallengeSwarm:
     model_specs: list[str] = field(default_factory=list)
     no_submit: bool = False
     coordinator_inbox: asyncio.Queue | None = None
+    # 外部逐步过程 sink：收到 solver 的 tool_call/tool_result/model_response 事件
+    # （同步回调，供 adapter 转发到前端 SSE）
+    trace_sink: Callable[[str, dict], None] | None = None
 
     def __post_init__(self) -> None:
         """Resolve model specs from settings if not explicitly provided."""
@@ -84,6 +87,10 @@ class ChallengeSwarm:
         def _submit_fn(flag): return self.try_submit_flag(flag, model_spec)
         _notify = self._make_notify_fn(model_spec)
 
+        def _trace(event: dict) -> None:
+            if self.trace_sink is not None:
+                self.trace_sink(model_spec, event)
+
         if provider == "claude-sdk":
             from backend.agents.claude_solver import ClaudeSolver
             return ClaudeSolver(
@@ -98,6 +105,7 @@ class ChallengeSwarm:
                 submit_fn=_submit_fn,
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
+                trace_sink=_trace if self.trace_sink is not None else None,
             )
 
         if provider == "codex":
@@ -114,6 +122,7 @@ class ChallengeSwarm:
                 submit_fn=_submit_fn,
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
+                trace_sink=_trace if self.trace_sink is not None else None,
             )
 
         return self._create_pydantic_solver(model_spec)
@@ -139,6 +148,10 @@ class ChallengeSwarm:
             cancel_event=self.cancel_event,
             sandbox=sandbox,
             owns_sandbox=owns_sandbox,
+            trace_sink=(
+                (lambda event: self.trace_sink(model_spec, event))
+                if self.trace_sink is not None else None
+            ),
         )
         solver.deps.message_bus = self.message_bus
         solver.deps.model_spec = model_spec

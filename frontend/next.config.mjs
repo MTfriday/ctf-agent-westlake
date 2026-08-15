@@ -5,7 +5,8 @@
  * server in the operator's environment, which handles dynamic routes natively;
  * `/api` is proxied to the FastAPI backend (default :8000; override MUTEKI_BACKEND).
  */
-const BACKEND = process.env.AEMEATH_BACKEND || "http://127.0.0.1:8001";
+// adapter 默认端口 12345（8001 在部分 Windows 落在 Hyper-V 排除端口段无法 bind）
+const BACKEND = process.env.AEMEATH_BACKEND || "http://127.0.0.1:12345";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {

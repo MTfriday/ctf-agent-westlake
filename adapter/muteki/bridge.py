@@ -30,6 +30,7 @@ RUN_FINISHED = "run.finished"
 TEXT_DELTA = "text.delta"
 REASONING_DELTA = "reasoning.delta"
 TOOL_START = "tool.start"
+TOOL_CALL_ARGS = "tool.args"
 TOOL_RESULT = "tool.result"
 TERMINAL_OUTPUT = "terminal.output"
 SOLVE_GRAPH_DELTA = "solvegraph.delta"
@@ -115,16 +116,39 @@ class EventBridge:
                     "name": p.get("challenge_name") or rid,
                     "category": p.get("category", ""),
                     "target": p.get("target", ""),
+                    "description": p.get("description", ""),
                     "expected_flags": 1,
                     "multi_flag": False,
                 },
             }))
 
         elif t is AEventType.ENGINE_LOG:
-            text = str(p.get("message", ""))
-            if text:
-                out.append(self._mk(TEXT_DELTA, {"text": text, "main_thread": True},
-                                    solver_id=p.get("solver_id")))
+            # 逐步过程事件（swarm trace）：tool_call → tool.start，
+            # tool_result → tool.result，model_response/其它 → text.delta
+            kind = str(p.get("kind") or "")
+            solver = str(p.get("solver") or p.get("solver_id") or "")
+            if kind == "tool_call":
+                out.append(self._mk(TOOL_START, {
+                    "tool": p.get("tool", "?"),
+                    "args": str(p.get("args", ""))[:500],
+                }, solver_id=solver or None))
+                if p.get("args"):
+                    out.append(self._mk(TOOL_CALL_ARGS, {
+                        "tool": p.get("tool", "?"),
+                        "args": str(p.get("args", "")),
+                    }, solver_id=solver or None))
+            elif kind == "tool_result":
+                out.append(self._mk(TOOL_RESULT, {
+                    "tool": p.get("tool", "?"),
+                    "result": str(p.get("result", ""))[:2000],
+                }, solver_id=solver or None))
+            else:
+                text = str(p.get("message") or p.get("text") or "")
+                if not text and p.get("type"):
+                    text = f"[{p.get('type', '')}]"
+                if text:
+                    out.append(self._mk(TEXT_DELTA, {"text": text, "main_thread": True},
+                                        solver_id=solver or None))
 
         elif t is AEventType.BLACKBOARD_DELTA:
             kind = p.get("kind")

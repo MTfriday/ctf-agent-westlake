@@ -48,12 +48,14 @@ class RunEntry:
     paused: bool = False
     status: str = "draft"  # draft|running|paused|solved|finished|failed
     flag: Optional[str] = None
+    error: Optional[str] = None
     pinned: bool = False
     pinned_at: Optional[float] = None
     archived: bool = False
     folder_id: Optional[str] = None
     order: int = 0
     updated: float = field(default_factory=time.time)
+    value: int = 0
     # 内部：Aemeath 侧信息
     engine_run_id: Optional[str] = None
     prompt: str = ""
@@ -67,6 +69,7 @@ class RunEntry:
             "run_id": self.run_id,
             "name": self.name or self.run_id,
             "category": self.category,
+            "value": self.value,
             "started": self.started,
             "finished": self.finished,
             "solved": self.solved,
@@ -85,13 +88,18 @@ class RunEntry:
     def meta(self) -> dict[str, Any]:
         """仅元数据子集（持久化）。"""
         return {
-            "name": self.name, "category": self.category,
+            "name": self.name, "category": self.category, "value": self.value,
+            "solved": self.solved, "status": self.status,
+            "prompt": self.prompt,
+            "flag": self.flag, "error": self.error,
             "pinned": self.pinned, "pinned_at": self.pinned_at,
             "archived": self.archived, "folder_id": self.folder_id, "order": self.order,
         }
 
     def apply_meta(self, meta: dict[str, Any]) -> None:
-        for k in ("name", "category", "pinned", "pinned_at", "archived", "folder_id", "order"):
+        for k in ("name", "category", "value", "solved", "status", "prompt",
+                  "flag", "error",
+                  "pinned", "pinned_at", "archived", "folder_id", "order"):
             if k in meta:
                 setattr(self, k, meta[k])
 
@@ -117,6 +125,9 @@ class RunManager:
         self._order_counter = 0
         self._seeded = False
         self._sync_task: Optional[asyncio.Task] = None
+        self._auto_task: Optional[asyncio.Task] = None
+        # 用户删除的 run_id（防止全自动 seed 把平台上的题重新注册/重新求解）
+        self._deleted: set[str] = set()
         self._load_meta()
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
@@ -126,8 +137,21 @@ class RunManager:
             return
         self._sync_task = asyncio.create_task(self._sync_loop(), name="muteki-sync")
         await self._seed_challenges()
+        # 全自动求解：启动后自动对未解出题目发起求解（蓝皮书 P1 轮询器语义）
+        if getattr(self.runtime.settings, "adapter_auto_solve", True):
+            self._auto_task = asyncio.create_task(
+                self._auto_solve_loop(), name="muteki-auto-solve"
+            )
+            logger.info("auto-solve enabled — scanning unsolved challenges")
 
     async def stop(self) -> None:
+        if self._auto_task is not None:
+            self._auto_task.cancel()
+            try:
+                await self._auto_task
+            except asyncio.CancelledError:
+                pass
+            self._auto_task = None
         if self._sync_task is not None:
             self._sync_task.cancel()
             try:
@@ -136,6 +160,44 @@ class RunManager:
                 pass
             self._sync_task = None
         self._save_meta()
+
+    # ── 全自动求解循环 ──────────────────────────────────────────────────
+    async def _auto_solve_loop(self) -> None:
+        """周期扫描：自动发起对未解出 run 的求解；检测平台新题/已解出。
+
+        已解出的题目跳过（不浪费 token）；已 running/solved/finished 的跳过。
+        串行逐个启动，避免同时拉爆资源；一轮内全部启动后等待下个周期。
+        """
+        interval = float(getattr(self.runtime.settings, "adapter_auto_poll_interval", 20.0) or 20.0)
+        try:
+            while True:
+                try:
+                    # 定期重拉平台题目：发现新题自动预注册 + 检测已解出
+                    await self._seed_challenges()
+                    for entry in sorted(self._runs.values(), key=lambda r: r.order):
+                        if entry.solved or entry.started:
+                            continue
+                        # 已解出但运行中结束、或从未启动 → 自动启动求解
+                        logger.info("auto-solve: starting %r (unsolved)", entry.run_id)
+                        try:
+                            await self.start(
+                                entry.run_id,
+                                {"kind": "swarm", "prompt": entry.prompt,
+                                 "challenge": {"name": entry.run_id,
+                                               "category": entry.category}},
+                            )
+                        except RuntimeError as e:
+                            # 已解出等拒绝原因——标记并继续
+                            logger.warning("auto-solve %s skipped: %s", entry.run_id, e)
+                            entry.solved = True
+                            entry.status = "solved"
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("auto-solve %s failed: %s", entry.run_id, e)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("auto-solve cycle error: %s", e)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.info("auto-solve loop stopped")
 
     # ── challenge 预注册 ─────────────────────────────────────────────────
     async def _seed_challenges(self) -> None:
@@ -149,18 +211,59 @@ class RunManager:
             return
         for ch in challenges:
             name = str(ch.get("name") or "").strip()
-            if not name or name in self._runs:
+            if not name:
                 continue
-            entry = RunEntry(
-                run_id=name,
-                name=str(ch.get("title") or ch.get("name") or name),
-                category=str(ch.get("category") or ""),
-                status="draft",
-                order=self._next_order(),
-            )
-            self._runs[name] = entry
+            # 用户已删除的题：不重新注册（防止自动复活）
+            if name in self._deleted:
+                continue
+            # 平台已解出的题标记为 solved（前端显示已解出 + 不可启动，避免浪费 token）
+            already_solved = bool(ch.get("solved") or ch.get("solved_by_me") or False)
+            desc = str(ch.get("description") or "").strip()
+            value = ch.get("value")
+            existing = self._runs.get(name)
+            if existing is not None:
+                # 已有 run：补齐 solved/描述（若之前未保存），并确保有开场事件
+                if already_solved and not existing.solved:
+                    existing.solved = True
+                    existing.status = "solved"
+                if desc and not existing.prompt:
+                    existing.prompt = desc
+                if value is not None and not existing.value:
+                    existing.value = int(value)
+                entry = existing
+            else:
+                entry = RunEntry(
+                    run_id=name,
+                    name=str(ch.get("title") or ch.get("name") or name),
+                    category=str(ch.get("category") or ""),
+                    status="solved" if already_solved else "draft",
+                    solved=already_solved,
+                    order=self._next_order(),
+                )
+                if desc:
+                    entry.prompt = desc
+                if value is not None:
+                    entry.value = int(value)
+                self._runs[name] = entry
+            # 预注册 run 写入初始 RUN_STARTED 事件（携带题面描述），
+            # 这样前端打开草稿时能渲染出题目开场气泡，而不是空白对话区。
+            # history 为空（首次 seed 或重启后）时补上；已有事件则保留。
+            if not entry.history:
+                if entry.bridge is None:
+                    entry.bridge = EventBridge(entry.run_id)
+                entry.history.append(entry.bridge._mk(RUN_STARTED, {
+                    "challenge": {
+                        "name": entry.name or name,
+                        "category": entry.category,
+                        "target": str(ch.get("connection_info") or ""),
+                        "description": desc,
+                        "expected_flags": 1,
+                        "multi_flag": False,
+                    },
+                }))
         self._save_meta()
-        logger.info("seeded %d challenge runs", len(self._runs))
+        logger.info("seeded %d challenge runs (%d already solved)",
+                    len(self._runs), sum(1 for r in self._runs.values() if r.solved))
 
     # ── runs 列表 / 查询 ─────────────────────────────────────────────────
     def list_runs(self, include_archived: bool = False) -> list[dict[str, Any]]:
@@ -236,13 +339,15 @@ class RunManager:
         r = self.get(run_id)
         if r is None:
             return False
-        # 尝试停止引擎
+        # 尝试停止引擎（已启动的 swarm / worker）
         if r.engine_run_id:
             try:
                 await self.runtime.stop_engine(r.engine_run_id)
             except Exception:  # noqa: BLE001
                 pass
         self._runs.pop(run_id, None)
+        # 记录为已删除：全自动 seed 不再重新注册/重新求解该题（防止“复活”浪费 token）
+        self._deleted.add(run_id)
         self._save_meta()
         return True
 
@@ -286,6 +391,9 @@ class RunManager:
     async def start(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """启动一个 run：翻译 muteki 启动体 → Aemeath launch_solver。"""
         entry = self.ensure(run_id)
+        # 平台已解出的题拒绝再次启动（避免浪费 token 重复求解）
+        if entry.solved:
+            raise RuntimeError(f"题目 {entry.name or run_id!r} 已在平台解出，无需重复求解。")
         ch = body.get("challenge") or {}
         if ch.get("name"):
             entry.name = str(ch["name"])
@@ -358,6 +466,8 @@ class RunManager:
                 entry.solved = bool(p.get("status") == "solved" and p.get("flag"))
                 if p.get("flag"):
                     entry.flag = str(p["flag"])
+                if p.get("error"):
+                    entry.error = str(p["error"])
             entry.updated = time.time()
         # 历史 + 广播
         for me in events:
@@ -457,6 +567,7 @@ class RunManager:
             logger.warning("load meta failed: %s", e)
             return
         self._order_counter = 0
+        self._deleted = set(data.get("deleted") or [])
         for rid, meta in (data.get("runs") or {}).items():
             entry = RunEntry(run_id=rid)
             entry.apply_meta(meta)
@@ -474,6 +585,7 @@ class RunManager:
             data = {
                 "runs": {rid: r.meta() for rid, r in self._runs.items()},
                 "folders": [f.as_dict() for f in self._folders.values()],
+                "deleted": sorted(self._deleted),
             }
             self._meta_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"

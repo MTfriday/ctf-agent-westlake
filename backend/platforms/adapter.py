@@ -187,6 +187,22 @@ class PlatformAdapter:
 
         return str(ch_dir)
 
+    async def start_environment(self, challenge_id: str) -> Any:
+        """Start a dynamic container for a challenge, returning its environment.
+
+        Transparently forwards to the underlying client when supported; returns
+        an empty environment-like object otherwise (engines treat empty entry as
+        "no dynamic instance available").
+        """
+        if hasattr(self._client, "start_environment"):
+            return await self._client.start_environment(challenge_id)
+        # 平台不支持动态容器：返回空环境（entry="")
+        return type("EmptyEnv", (), {"entry": "", "status": "", "raw": {}})()
+
+    async def get_challenge_detail(self, challenge_id: str | int) -> Any:
+        """Fetch detailed challenge info (includes dynamic instance entry)."""
+        return await self._client.get_challenge_detail(challenge_id)
+
     async def close(self) -> None:
         await self._client.close()
 

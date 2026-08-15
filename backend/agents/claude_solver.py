@@ -14,6 +14,8 @@ import re
 import shlex
 import time
 
+from typing import Callable
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -52,6 +54,7 @@ class ClaudeSolver:
         submit_fn=None,
         message_bus=None,
         notify_coordinator=None,
+        trace_sink: Callable[[dict], None] | None = None,
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
@@ -72,7 +75,7 @@ class ClaudeSolver:
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
         )
         self.loop_detector = LoopDetector()
-        self.tracer = SolverTracer(meta.name, self.model_id)
+        self.tracer = SolverTracer(meta.name, self.model_id, sink=trace_sink)
         self.agent_name = f"{meta.name}/{self.model_id}"
 
         self._client: ClaudeSDKClient | None = None

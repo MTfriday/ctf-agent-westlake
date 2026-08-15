@@ -153,7 +153,7 @@ input, select, textarea { font: inherit; }
 .shell { display: flex; height: 100vh; overflow: hidden; background: var(--bg); }
 
 /* ---------- left thread rail (ChatGPT-style run list) ---------- */
-.rail { width: var(--rail-width, 264px); flex: none; position: relative; background: var(--bg2); border-right: 1px solid var(--border);
+.rail { width: var(--rail-width, 264px); flex: none; position: relative; z-index: 10; background: var(--bg2); border-right: 1px solid var(--border);
   transition: width .22s ease; overflow: visible; }
 .rail.collapsed { width: 0; border-right: none; }
 .rail.resizing { transition: none; }

@@ -193,6 +193,7 @@ class SwarmEngineBackend(EngineBackend):
         return run.run_id
 
     async def _run_swarm(self, run: RunRecord) -> None:
+        trace_task: Optional[asyncio.Task] = None
         try:
             await self._emit(run, f"[swarm:{run.mode}] 启动真实求解引擎")
             platform = self.runtime.platform
@@ -203,15 +204,44 @@ class SwarmEngineBackend(EngineBackend):
             if ch is None:
                 raise RuntimeError(f"Challenge not found on platform: {run.problem_id}")
 
+            # 1.5 动态容器题：connection_info 为空时尝试启动实例，拿到真实入口
+            if not str(ch.get("connection_info") or "").strip():
+                entry = await self._start_platform_env(ch)
+                if entry:
+                    ch["connection_info"] = entry
+                    await self._emit(run, f"已启动动态实例: {entry}", "success")
+
             # 2. 拉取附件 + 元数据
             from backend.prompts import ChallengeMeta
 
             ch_dir = await platform.pull_challenge(ch, self.runtime.challenges_root)
             meta = ChallengeMeta.from_yaml(str(Path(ch_dir) / "metadata.yml"))
+            if not meta.connection_info and str(ch.get("connection_info") or "").strip():
+                meta.connection_info = str(ch["connection_info"]).strip()
 
-            # 3. 构建 ChallengeSwarm 并行求解
+            # 3. 构建 ChallengeSwarm 并行求解，逐步过程经队列转发到前端
             from backend.agents.swarm import ChallengeSwarm
             from backend.solver_base import FLAG_FOUND
+
+            trace_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
+
+            def _trace_sink(model_spec: str, event: dict) -> None:
+                try:
+                    trace_queue.put_nowait((model_spec, event))
+                except asyncio.QueueFull:
+                    pass
+
+            async def _forward_trace() -> None:
+                while True:
+                    model_spec, event = await trace_queue.get()
+                    kind = event.get("type", "log")
+                    payload = {"kind": kind, "solver": model_spec, **event}
+                    await self.runtime.bus.publish(
+                        ev(EventType.ENGINE_LOG, run_id=run.run_id,
+                           problem_id=run.problem_id, **payload)
+                    )
+
+            trace_task = asyncio.create_task(_forward_trace(), name=f"trace-{run.run_id}")
 
             swarm = ChallengeSwarm(
                 challenge_dir=ch_dir,
@@ -221,6 +251,7 @@ class SwarmEngineBackend(EngineBackend):
                 settings=self.runtime.settings,
                 model_specs=self.runtime.model_specs,
                 no_submit=self.runtime.no_submit,
+                trace_sink=_trace_sink,
             )
             self._swarms[run.problem_id] = swarm
             await self._emit(run, f"swarm 已就绪（{len(self.runtime.model_specs)} 个模型）")
@@ -234,6 +265,11 @@ class SwarmEngineBackend(EngineBackend):
                 )
                 await self.runtime.bus.publish(
                     ev(EventType.BLACKBOARD_DELTA, problem_id=run.problem_id, kind="discovery")
+                )
+                # 前端 flag 区点亮：FLAG_SOLVED → solvegraph.delta(flag)
+                await self.runtime.bus.publish(
+                    ev(EventType.FLAG_SOLVED, run_id=run.run_id, problem_id=run.problem_id,
+                       flag=run.flag)
                 )
             else:
                 run.status = "failed"
@@ -253,6 +289,43 @@ class SwarmEngineBackend(EngineBackend):
                 ev(EventType.RUN_FINISHED, run_id=run.run_id, problem_id=run.problem_id,
                    status="failed", error=str(e))
             )
+        finally:
+            if trace_task is not None:
+                trace_task.cancel()
+                try:
+                    await trace_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+
+    async def _start_platform_env(self, ch: dict[str, Any]) -> str:
+        """尝试为动态容器题获取实例入口（host:port / URL）。
+
+        优先从 challenge detail 的 context.instanceEntry 读取（容器可能已存在，
+        列表接口不含入口，详情接口才有）；读不到再尝试 start_environment 创建。
+        """
+        platform = self.runtime.platform
+        cid = str(ch.get("id") or "")
+        if not cid:
+            return ""
+        try:
+            # 1) 详情接口：已有实例的入口在这里（列表接口不含）
+            if hasattr(platform, "get_challenge_detail"):
+                try:
+                    detail = await platform.get_challenge_detail(cid)
+                    entry = getattr(detail, "connection_info", "") or ""
+                    if str(entry).strip():
+                        return str(entry).strip()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("get_challenge_detail for %s: %s", ch.get("name"), e)
+            # 2) 无已有实例 → 尝试创建动态容器
+            if hasattr(platform, "start_environment"):
+                env = await platform.start_environment(cid)
+                entry = getattr(env, "entry", "") or ""
+                if str(entry).strip():
+                    return str(entry).strip()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("start_environment failed for %s: %s", ch.get("name"), e)
+        return ""
 
     async def status(self, run_id: str) -> Optional[dict[str, Any]]:
         base = await super().status(run_id)

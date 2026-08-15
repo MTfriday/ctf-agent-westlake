@@ -6,20 +6,48 @@ import atexit
 import json
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 
 def _sanitize(s: str) -> str:
-    return s.replace("/", "_").replace(" ", "_")
+    """Sanitize a string for use in a filename on Windows/Unix.
+
+    Removes/replaces characters that are illegal in filenames: ``<>:"/\\|?*``
+    plus control chars, so challenge names like ``What is NC?`` produce valid
+    trace filenames.
+    """
+    out = []
+    for ch in s:
+        if ch in '<>:"/\\|?*' or ord(ch) < 32:
+            out.append("_")
+        elif ch in " \t":
+            out.append("_")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 class SolverTracer:
-    """Append-only JSONL event tracer. Flushes every write for tail -f streaming."""
+    """Append-only JSONL event tracer. Flushes every write for tail -f streaming.
 
-    def __init__(self, challenge_name: str, model_id: str, log_dir: str = "logs") -> None:
+    An optional synchronous ``sink`` callback is invoked on every event (in
+    addition to writing the JSONL file), letting the adapter forward the
+    per-step solve process (tool calls, results, model responses) to the
+    frontend in real time. The sink must be cheap and must never raise.
+    """
+
+    def __init__(
+        self,
+        challenge_name: str,
+        model_id: str,
+        log_dir: str = "logs",
+        sink: Optional[Callable[[dict], None]] = None,
+    ) -> None:
         Path(log_dir).mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
         self.path = str(Path(log_dir) / f"trace-{_sanitize(challenge_name)}-{_sanitize(model_id)}-{ts}.jsonl")
         self._fh = open(self.path, "a")
+        self._sink = sink
         atexit.register(self._close)
 
     def close(self) -> None:
@@ -34,10 +62,16 @@ class SolverTracer:
 
     def _write(self, event: dict) -> None:
         try:
-            self._fh.write(json.dumps({"ts": time.time(), **event}) + "\n")
+            record = {"ts": time.time(), **event}
+            self._fh.write(json.dumps(record) + "\n")
             self._fh.flush()
         except Exception:
             pass
+        if self._sink is not None:
+            try:
+                self._sink(event)
+            except Exception:
+                pass
 
     def tool_call(self, tool_name: str, args: dict | str, step: int) -> None:
         args_str = args if isinstance(args, str) else json.dumps(args)

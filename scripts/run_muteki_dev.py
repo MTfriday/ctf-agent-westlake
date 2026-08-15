@@ -1,6 +1,6 @@
 """开发用适配器启动器 — 注入 mock 平台 + mock 引擎（不依赖 GZCTF）。
 
-用法: .venv\\Scripts\\python.exe scripts\\run_muteki_dev.py   # :8001
+用法: .venv\\Scripts\\python.exe scripts\\run_muteki_dev.py   # :12345
 """
 
 from __future__ import annotations
@@ -39,4 +39,4 @@ def make_app():
 
 
 if __name__ == "__main__":
-    uvicorn.run(make_app(), host="127.0.0.1", port=8001, log_level="info")
+    uvicorn.run(make_app(), host="127.0.0.1", port=12345, log_level="info")

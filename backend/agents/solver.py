@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import ModelRequest, UserPromptPart
@@ -117,6 +117,7 @@ class Solver:
         cancel_event: asyncio.Event | None = None,
         sandbox: DockerSandbox | None = None,
         owns_sandbox: bool | None = None,
+        trace_sink: Callable[[dict], None] | None = None,
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
@@ -144,7 +145,7 @@ class Solver:
             cost_tracker=cost_tracker,
         )
         self.loop_detector = LoopDetector()
-        self.tracer = SolverTracer(meta.name, self.model_id)
+        self.tracer = SolverTracer(meta.name, self.model_id, sink=trace_sink)
         self.agent_name = f"{meta.name}/{self.model_id}"
         self._agent: Agent[SolverDeps, FlagFound] | None = None
         self._messages: list = []
