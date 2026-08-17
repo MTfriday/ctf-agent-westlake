@@ -28,11 +28,13 @@ DEFAULT_MODELS: list[str] = [
 
 # Fallback models for environments without claude/codex CLIs — uses OpenAI-compatible APIs
 # DeepSeek 新版模型：v4-flash（默认，便宜）/ v4-pro（更强但贵，仅复杂题用）
+# 百炼现行推荐：qwen3.8-max（最强）/ qwen3.7-plus（均衡）/ qwen3.7-flash（最快最省）
 FALLBACK_MODELS: list[str] = [
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-pro",
-    "bailian/qwen-max",
-    "bailian/qwen-plus",
+    "bailian/qwen3.7-flash",
+    "bailian/qwen3.7-plus",
+    "bailian/qwen3.8-max",
     "openai/gpt-4o",
     "openai/gpt-4o-mini",
 ]
@@ -133,6 +135,10 @@ CONTEXT_WINDOWS: dict[str, int] = {
     # DeepSeek 新版模型
     "deepseek-v4-flash": 128_000,
     "deepseek-v4-pro": 128_000,
+    # 阿里百炼通义千问（现行推荐）
+    "qwen3.8-max": 1_000_000,
+    "qwen3.7-plus": 1_000_000,
+    "qwen3.7-flash": 1_000_000,
 }
 
 # Models that support vision
@@ -235,12 +241,22 @@ def resolve_model_settings(spec: str) -> ModelSettings:
                 max_tokens=128_000,
                 openai_reasoning_effort="none",
             )
-        case "azure" | "zen" | "bailian":
-            # Azure/Zen/Bailian use OpenAI chat completions — server-side
+        case "azure" | "zen":
+            # Azure/Zen use OpenAI chat completions — server-side
             # prompt caching is automatic, no explicit config needed. Set max_tokens
             # to avoid reserving the full context window.
             return OpenAIChatModelSettings(
                 max_tokens=128_000,
+            )
+        case "bailian":
+            # 阿里百炼 qwen — OpenAI 兼容接口。注意：qwen3.x 默认开启思考模式，
+            # 与 pydantic-ai 在需要强制工具时发的 tool_choice='required' 冲突（400
+            # "tool_choice does not support being set to required in thinking mode"）。
+            # 与 DeepSeek v4 同理，必须通过 reasoning_effort='none' 关闭思考，
+            # 否则求解器一启动就会因 400 直接失败。
+            return OpenAIChatModelSettings(
+                max_tokens=128_000,
+                openai_reasoning_effort="none",
             )
         case "google":
             return GoogleModelSettings(

@@ -60,12 +60,15 @@ def build_prompt(
     distfile_names: list[str],
     container_arch: str = "unknown",
     has_named_tools: bool = True,
+    extra_context: str = "",
 ) -> str:
     """Build the system prompt.
 
     has_named_tools: True for Pydantic AI solver (has view_image, webhook_create, etc.
     as discrete tools). False for Claude SDK (bash-only — model should use
     steghide/exiftool/curl instead). Codex has named dynamic tools so uses True.
+
+    extra_context: 断点续传注入的黑板上下文 + 操作员提示（非空时追加为独立章节）。
     """
     conn_info = _rewrite_connection_info(meta.connection_info.strip())
 
@@ -177,5 +180,18 @@ def build_prompt(
         "6. Once CORRECT: output `FLAG: <value>` on its own line.",
         "7. Do not guess. Do not ask. Cover maximum surface area.",
     ]
+
+    # 断点续传：上次求解的黑板上下文 + 操作员提示。告诉模型这些是"已经做过/已确认"的，
+    # 不要重复踩坑，在已有发现基础上继续推进。
+    if extra_context and extra_context.strip():
+        lines += [
+            "",
+            "## Prior Progress (previous attempt)",
+            "You are CONTINUING a previous solving session. The following notes record",
+            "what was already tried and what is already known. Use them as your starting",
+            "point — do NOT repeat confirmed dead-ends, DO build on existing discoveries.",
+            "",
+            extra_context.strip(),
+        ]
 
     return "\n".join(lines)

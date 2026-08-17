@@ -47,7 +47,8 @@ solver:
   # 模型选择（逗号分隔，留空=自动检测可用provider）
   # 没有 claude/codex CLI 时会自动回退到 OpenAI 兼容 API
   # 示例: "deepseek/deepseek-v4-flash,deepseek/deepseek-v4-pro"
-  models: ""
+  # 当前: deepseek 主打 + 百炼多模型并行竞速（qwen3.8-max 强推理 / qwen3.7-plus 均衡 / qwen3.7-flash 快速）
+  models: "deepseek/deepseek-v4-flash,bailian/qwen3.7-flash,bailian/qwen3.7-plus,bailian/qwen3.8-max"
 
   # Coordinator 后端: "claude" | "codex" | "pydantic" | "auto"
   # pydantic 可用任意 OpenAI 兼容模型（DeepSeek/百炼），无需 claude/codex CLI

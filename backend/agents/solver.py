@@ -118,6 +118,7 @@ class Solver:
         sandbox: DockerSandbox | None = None,
         owns_sandbox: bool | None = None,
         trace_sink: Callable[[dict], None] | None = None,
+        extra_context: str = "",
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
@@ -127,6 +128,7 @@ class Solver:
         self.cost_tracker = cost_tracker
         self.settings = settings
         self.cancel_event = cancel_event or asyncio.Event()
+        self.extra_context = extra_context  # 黑板上下文 + 操作员提示（断点续传）
         self._owns_sandbox = owns_sandbox if owns_sandbox is not None else (sandbox is None)
 
         self.sandbox = sandbox or DockerSandbox(
@@ -168,6 +170,7 @@ class Solver:
             self.meta,
             distfile_names,
             container_arch=container_arch,
+            extra_context=self.extra_context,
         )
 
         model = resolve_model(self.model_spec, self.settings)

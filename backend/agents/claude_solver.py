@@ -55,6 +55,7 @@ class ClaudeSolver:
         message_bus=None,
         notify_coordinator=None,
         trace_sink: Callable[[dict], None] | None = None,
+        extra_context: str = "",
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
@@ -87,6 +88,7 @@ class ClaudeSolver:
         self._findings = ""
         self._cost_usd = 0.0
         self._bump_insights: str | None = None
+        self.extra_context = extra_context  # 黑板上下文 + 操作员提示（断点续传）
 
     async def start(self) -> None:
         await self.sandbox.start()
@@ -108,6 +110,7 @@ class ClaudeSolver:
         system_prompt = sandbox_preamble + build_prompt(
             self.meta, distfile_names, container_arch=container_arch,
             has_named_tools=False,
+            extra_context=self.extra_context,
         )
 
         # PreToolUse hook: rewrite Bash commands to run in the sandbox container.

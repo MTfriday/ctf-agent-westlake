@@ -58,6 +58,8 @@ class ChallengeSwarm:
     # 外部逐步过程 sink：收到 solver 的 tool_call/tool_result/model_response 事件
     # （同步回调，供 adapter 转发到前端 SSE）
     trace_sink: Callable[[str, dict], None] | None = None
+    # 断点续传：上次求解的黑板上下文 + 操作员提示，注入 solver 系统提示
+    extra_context: str = ""
 
     def __post_init__(self) -> None:
         """Resolve model specs from settings if not explicitly provided."""
@@ -106,6 +108,7 @@ class ChallengeSwarm:
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
                 trace_sink=_trace if self.trace_sink is not None else None,
+                extra_context=self.extra_context,
             )
 
         if provider == "codex":
@@ -123,6 +126,7 @@ class ChallengeSwarm:
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
                 trace_sink=_trace if self.trace_sink is not None else None,
+                extra_context=self.extra_context,
             )
 
         return self._create_pydantic_solver(model_spec)
@@ -152,6 +156,7 @@ class ChallengeSwarm:
                 (lambda event: self.trace_sink(model_spec, event))
                 if self.trace_sink is not None else None
             ),
+            extra_context=self.extra_context,
         )
         solver.deps.message_bus = self.message_bus
         solver.deps.model_spec = model_spec

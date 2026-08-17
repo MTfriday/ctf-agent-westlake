@@ -165,7 +165,8 @@ class RunManager:
     async def _auto_solve_loop(self) -> None:
         """周期扫描：自动发起对未解出 run 的求解；检测平台新题/已解出。
 
-        已解出的题目跳过（不浪费 token）；已 running/solved/finished 的跳过。
+        已解出的题目跳过（不浪费 token）；已 running/solved 的跳过。
+        中断的 run（failed/stopped 且黑板有上下文）会自动从黑板续跑。
         串行逐个启动，避免同时拉爆资源；一轮内全部启动后等待下个周期。
         """
         interval = float(getattr(self.runtime.settings, "adapter_auto_poll_interval", 20.0) or 20.0)
@@ -175,7 +176,50 @@ class RunManager:
                     # 定期重拉平台题目：发现新题自动预注册 + 检测已解出
                     await self._seed_challenges()
                     for entry in sorted(self._runs.values(), key=lambda r: r.order):
-                        if entry.solved or entry.started:
+                        if entry.solved:
+                            continue
+                        # adapter 重启后：引擎已丢失的"running" run → 视为中断，从黑板续跑
+                        if entry.started and not entry.finished:
+                            alive = False
+                            if entry.engine_run_id and self.runtime.engine is not None:
+                                alive = entry.engine_run_id in (self.runtime.engine.runs or {})
+                            if not alive:
+                                logger.info(
+                                    "auto-solve: restarting interrupted %r (engine lost)",
+                                    entry.run_id,
+                                )
+                                try:
+                                    await self.start(
+                                        entry.run_id,
+                                        {"kind": "swarm", "prompt": entry.prompt,
+                                         "challenge": {"name": entry.run_id,
+                                                       "category": entry.category}},
+                                    )
+                                except RuntimeError as e:
+                                    logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning("auto-resume %s failed: %s", entry.run_id, e)
+                            continue
+                        # 断点续传：上次失败/停止 且 黑板留有上下文 → 自动续跑
+                        if entry.started and entry.finished and entry.status in ("failed", "stopped"):
+                            has_ctx = self._has_blackboard_ctx(entry.run_id)
+                            if has_ctx:
+                                logger.info(
+                                    "auto-solve: resuming %r from blackboard", entry.run_id
+                                )
+                                try:
+                                    await self.start(
+                                        entry.run_id,
+                                        {"kind": "swarm", "prompt": entry.prompt,
+                                         "challenge": {"name": entry.run_id,
+                                                       "category": entry.category}},
+                                    )
+                                except RuntimeError as e:
+                                    logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning("auto-resume %s failed: %s", entry.run_id, e)
+                            continue
+                        if entry.started:
                             continue
                         # 已解出但运行中结束、或从未启动 → 自动启动求解
                         logger.info("auto-solve: starting %r (unsolved)", entry.run_id)
@@ -198,6 +242,14 @@ class RunManager:
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             logger.info("auto-solve loop stopped")
+
+    def _has_blackboard_ctx(self, run_id: str) -> bool:
+        """黑板是否留有该 run 的实质上下文（发现/死路/部分结果/活跃计划）。"""
+        try:
+            ctx = self.runtime.store.get_context(run_id)
+            return bool(ctx and "暂无历史记忆" not in ctx)
+        except Exception:  # noqa: BLE001
+            return False
 
     # ── challenge 预注册 ─────────────────────────────────────────────────
     async def _seed_challenges(self) -> None:
@@ -511,13 +563,31 @@ class RunManager:
 
         store = self.runtime.store
         if action == "pause":
+            # 真暂停：停止底层引擎 task（断点续传靠黑板持久化上下文）
+            if entry.engine_run_id:
+                try:
+                    await self.runtime.stop_engine(entry.engine_run_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("pause stop engine failed: %s", e)
             entry.paused = True
             entry.status = "paused"
-            self._guidance(entry, "操作员暂停了求解")
+            self._guidance(entry, "操作员暂停了求解（引擎已停止，黑板上下文已保存）")
         elif action == "resume":
             entry.paused = False
             entry.status = "running"
-            self._guidance(entry, "操作员恢复求解")
+            # 真恢复：若引擎已被停止（finished），从黑板续跑重新启动
+            if entry.finished or not entry.started or not entry.engine_run_id:
+                self._guidance(entry, "操作员恢复求解——从黑板续跑重新启动")
+                try:
+                    await self.start(
+                        run_id,
+                        {"kind": "swarm", "prompt": entry.prompt,
+                         "challenge": {"name": entry.run_id, "category": entry.category}},
+                    )
+                except RuntimeError as e:
+                    self._guidance(entry, f"续跑启动失败: {e}")
+            else:
+                self._guidance(entry, "操作员恢复求解")
         elif action == "mark_false":
             flag = str(body.get("flag") or text)
             if flag:

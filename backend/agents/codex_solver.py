@@ -133,6 +133,7 @@ class CodexSolver:
         message_bus=None,
         notify_coordinator=None,
         trace_sink: Callable[[dict], None] | None = None,
+        extra_context: str = "",
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
@@ -171,6 +172,7 @@ class CodexSolver:
         self._pending_responses: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
         self._turn_done: asyncio.Event = asyncio.Event()
+        self.extra_context = extra_context  # 黑板上下文 + 操作员提示（断点续传）
 
     async def start(self) -> None:
         await self.sandbox.start()
@@ -182,6 +184,7 @@ class CodexSolver:
         system_prompt = build_prompt(
             self.meta, distfile_names, container_arch=container_arch,
             has_named_tools=True,
+            extra_context=self.extra_context,
         )
 
         self._proc = await asyncio.create_subprocess_exec(

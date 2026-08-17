@@ -42,6 +42,8 @@ class RunRecord:
     finished_at: Optional[float] = None
     logs: list[dict] = field(default_factory=list)  # [{"ts","level","message"}]
     task: Optional[asyncio.Task] = None
+    # 续传上下文：启动时注入的黑板上下文 + 操作员提示（断点续传关键）
+    prompt: str = ""
 
     def to_dict(self, log_tail: int = 50) -> dict[str, Any]:
         return {
@@ -185,6 +187,7 @@ class SwarmEngineBackend(EngineBackend):
         mode: str = "auto",
     ) -> str:
         run = self._new_run(problem_id, mode)
+        run.prompt = prompt  # 保存黑板上下文 + 操作员提示，供 solver 续传使用
         run.status = "running"
         await self.runtime.bus.publish(
             ev(EventType.RUN_STARTED, run_id=run.run_id, problem_id=problem_id, mode=mode)
@@ -252,6 +255,9 @@ class SwarmEngineBackend(EngineBackend):
                 model_specs=self.runtime.model_specs,
                 no_submit=self.runtime.no_submit,
                 trace_sink=_trace_sink,
+                # 断点续传：把黑板上下文 + 操作员提示作为额外系统提示喂给 solver，
+                # 让新启动的 solver 知道之前的发现 / 死路 / 操作员意图。
+                extra_context=run.prompt,
             )
             self._swarms[run.problem_id] = swarm
             await self._emit(run, f"swarm 已就绪（{len(self.runtime.model_specs)} 个模型）")
