@@ -11,6 +11,8 @@ platform:
   # AccessKey 从 .env 读取：SLAB_ACCESS_KEY（X-Agent-AccessKey header）
   api_base_url: "https://pro.dasctf.com"   # 西湖论剑服务器地址
   access_key_env: "SLAB_ACCESS_KEY"
+  # 平台同时最多可开的动态靶机数（西湖论剑限制 3 台；0=不限制）
+  max_env: 3
 
   # ===== GZCTF 配置 (type=gzctf) =====（切回时取消注释并改 type）
   # 凭据从 .env 读取：GZCTF_USERNAME / GZCTF_PASSWORD（会话登录）或 GZCTF_TOKEN（推荐）

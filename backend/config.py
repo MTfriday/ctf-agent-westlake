@@ -39,6 +39,8 @@ class YamlConfigSource(PydanticBaseSettingsSource):
             # 西湖论剑 slab：Agent AccessKey
             "access_key": "slab_access_key",
             "access_key_env": "slab_access_key_env",
+            # 平台同时最多可开的动态靶机数（西湖论剑 3 台；0=不限制）
+            "max_env": "max_platform_env",
         },
         "solver": {
             "max_concurrent_challenges": "max_concurrent_challenges",
@@ -150,6 +152,9 @@ class Settings(BaseSettings):
     # 西湖论剑 slab（SECRET，来自 .env SLAB_ACCESS_KEY；X-Agent-AccessKey header）
     slab_access_key: str = ""
     slab_access_key_env: str = "SLAB_ACCESS_KEY"
+
+    # 平台同时最多可开的动态靶机数（西湖论剑限制 3 台；0=不限制）
+    max_platform_env: int = 3
 
     # GZCTF 凭据（SECRET，来自 .env）
     gzctf_username: str = ""

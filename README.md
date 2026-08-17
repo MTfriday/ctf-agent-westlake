@@ -411,6 +411,12 @@ flag:
 - 系统提交前会自动归一化（`normalize_flag`）剥掉 `DASCTF{}` / `flag{}` 外壳；`CTF{...}` 等其它外壳或题目自定义特殊格式原样保留。
 - 每题 flag **最大提交 50 次**，达到上限后系统会停止提交并提示求解器深入分析（`FLAG_MAX_SUBMIT` 可调，0=不限制）。
 
+### 动态靶机并发限制（slab 平台）
+
+- 平台同时最多可开 **3 台**动态靶机（西湖论剑限制），超限会被平台拒绝。
+- 系统用信号量限制同时运行的靶机环境数 ≤ `max_platform_env`（默认 3；`config.yaml platform.max_env` / `.env MAX_PLATFORM_ENV`，0=不限制）。
+- 环境名额在启动时占用、该题求解结束自动释放（引擎层 `_start_platform_env` / `_run_swarm`）。
+
 ## 自定义平台 API
 
 对非 CTFd 平台，在 `config.yaml` 中配置：

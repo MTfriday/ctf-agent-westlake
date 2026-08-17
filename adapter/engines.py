@@ -27,6 +27,20 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL = {"solved", "failed", "timeout", "stopped"}
 
+# 平台动态靶机并发信号量：限制同时运行的靶机环境数（西湖论剑 3 台；None=不限制）
+_env_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def configure_env_semaphore(max_env: int = 0) -> None:
+    """配置平台动态靶机并发上限（0 或负数 = 不限制）。
+
+    在引擎构建时调用一次；之后新起的求解 run 启动靶机环境时，
+    会在真正创建前 acquire、求解结束时（_run_swarm finally）release，
+    保证同时运行的靶机环境不超过平台限制。
+    """
+    global _env_semaphore
+    _env_semaphore = asyncio.Semaphore(max_env) if max_env and max_env > 0 else None
+
 
 @dataclass
 class RunRecord:
@@ -44,6 +58,8 @@ class RunRecord:
     task: Optional[asyncio.Task] = None
     # 续传上下文：启动时注入的黑板上下文 + 操作员提示（断点续传关键）
     prompt: str = ""
+    # 是否占用一个平台动态靶机名额（start_environment 成功后置 True，求解结束释放）
+    env_slot: bool = False
 
     def to_dict(self, log_tail: int = 50) -> dict[str, Any]:
         return {
@@ -208,8 +224,10 @@ class SwarmEngineBackend(EngineBackend):
                 raise RuntimeError(f"Challenge not found on platform: {run.problem_id}")
 
             # 1.5 动态容器题：connection_info 为空时尝试启动实例，拿到真实入口
+            #     平台限制同时最多开 N 台靶机（西湖论剑 3 台）：启动占用名额，
+            #     求解结束在 finally 释放（run.env_slot）。
             if not str(ch.get("connection_info") or "").strip():
-                entry = await self._start_platform_env(ch)
+                entry = await self._start_platform_env(ch, run)
                 if entry:
                     ch["connection_info"] = entry
                     await self._emit(run, f"已启动动态实例: {entry}", "success")
@@ -321,6 +339,12 @@ class SwarmEngineBackend(EngineBackend):
                    status="failed", error=str(e))
             )
         finally:
+            # 释放平台动态靶机名额（平台限制同时最多开 N 台）
+            if run.env_slot:
+                sem = _env_semaphore
+                if sem is not None:
+                    sem.release()
+                run.env_slot = False
             if trace_task is not None:
                 trace_task.cancel()
                 try:
@@ -328,11 +352,15 @@ class SwarmEngineBackend(EngineBackend):
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
 
-    async def _start_platform_env(self, ch: dict[str, Any]) -> str:
+    async def _start_platform_env(self, ch: dict[str, Any], run: RunRecord) -> str:
         """尝试为动态容器题获取实例入口（host:port / URL）。
 
         优先从 challenge detail 的 context.instanceEntry 读取（容器可能已存在，
         列表接口不含入口，详情接口才有）；读不到再尝试 start_environment 创建。
+
+        平台限制同时最多开 N 台靶机（西湖论剑 3 台）：真正创建环境前 acquire
+        信号量，成功则标记 run.env_slot（求解结束由 _run_swarm finally 释放）；
+        启动失败不占用名额。
         """
         platform = self.runtime.platform
         cid = str(ch.get("id") or "")
@@ -348,12 +376,25 @@ class SwarmEngineBackend(EngineBackend):
                         return str(entry).strip()
                 except Exception as e:  # noqa: BLE001
                     logger.warning("get_challenge_detail for %s: %s", ch.get("name"), e)
-            # 2) 无已有实例 → 尝试创建动态容器
+            # 2) 无已有实例 → 尝试创建动态容器（受限并发：平台最多同时 N 台）
             if hasattr(platform, "start_environment"):
-                env = await platform.start_environment(cid)
-                entry = getattr(env, "entry", "") or ""
-                if str(entry).strip():
-                    return str(entry).strip()
+                sem = _env_semaphore
+                acquired = False
+                if sem is not None:
+                    await sem.acquire()  # 等待空闲靶机名额
+                    acquired = True
+                try:
+                    env = await platform.start_environment(cid)
+                    entry = getattr(env, "entry", "") or ""
+                    if str(entry).strip():
+                        run.env_slot = True  # 占用一个靶机名额，求解结束释放
+                        return str(entry).strip()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("start_environment failed for %s: %s", ch.get("name"), e)
+                # 启动失败/无入口 → 不占用名额
+                if acquired and not run.env_slot:
+                    sem.release()
+                return ""
         except Exception as e:  # noqa: BLE001
             logger.warning("start_environment failed for %s: %s", ch.get("name"), e)
         return ""
@@ -505,6 +546,8 @@ class HybridEngineBackend(SwarmEngineBackend):
 
 def build_engine_backend(runtime: Any, name: str) -> EngineBackend:
     """按名称构建引擎后端（adapter_engine_backend 配置项）。"""
+    # 初始化平台动态靶机并发信号量（西湖论剑限制 3 台；0=不限制）
+    configure_env_semaphore(getattr(runtime.settings, "max_platform_env", 3))
     if name == "mock":
         return MockEngineBackend(runtime)
     if name in ("hybrid", "orchestrated"):
