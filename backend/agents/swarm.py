@@ -60,6 +60,10 @@ class ChallengeSwarm:
     trace_sink: Callable[[str, dict], None] | None = None
     # 断点续传：上次求解的黑板上下文 + 操作员提示，注入 solver 系统提示
     extra_context: str = ""
+    # 模型健康注册表（实时感知不可用模型并剔除）；None 表示不接入
+    health: Any = None
+    # 模型被禁用时回调（供 adapter 转发 ENGINE_LOG 到前端），签名 on_disabled(spec, detail)
+    on_model_disabled: Callable[[str, str], None] | None = None
 
     def __post_init__(self) -> None:
         """Resolve model specs from settings if not explicitly provided."""
@@ -224,9 +228,25 @@ class ChallengeSwarm:
             return result
         except Exception as e:
             logger.error(f"[{self.meta.name}/{model_spec}] Fatal: {e}", exc_info=True)
+            # 致命异常也上报健康（网络错误/认证错误等），以便实时剔除不可用模型
+            if self.health is not None:
+                disabled = self.health.report_failure(model_spec, str(e))
+                if disabled and self.on_model_disabled is not None:
+                    self.on_model_disabled(model_spec, str(e)[:200])
             return None
         finally:
             await solver.stop()
+
+    def _report_success(self, model_spec: str) -> None:
+        if self.health is not None:
+            self.health.report_success(model_spec)
+
+    def _report_failure(self, model_spec: str, error: str) -> None:
+        if self.health is None:
+            return
+        disabled = self.health.report_failure(model_spec, error)
+        if disabled and self.on_model_disabled is not None:
+            self.on_model_disabled(model_spec, error[:200])
 
     async def _run_solver_loop(self, solver, model_spec: str) -> tuple[SolverResult, SolverProtocol]:
         """Inner loop: start → run → bump → run → ..."""
@@ -239,6 +259,12 @@ class ChallengeSwarm:
         await solver.start()
 
         while not self.cancel_event.is_set():
+            # 实时健康感知：模型已被禁用（致命 403/连续错误）→ 立即终止，不再浪费 token
+            if self.health is not None and model_spec not in self.health.active_specs([model_spec]):
+                logger.warning(
+                    "[%s/%s] 模型已被禁用，提前终止", self.meta.name, model_spec
+                )
+                break
             result = await solver.run_until_done_or_gave_up()
 
             # Only broadcast useful findings — skip errors and broken solvers
@@ -250,6 +276,7 @@ class ChallengeSwarm:
                 await self.message_bus.post(model_spec, result.findings_summary[:500])
 
             if result.status == FLAG_FOUND:
+                self._report_success(model_spec)
                 self.cancel_event.set()
                 self.winner = result
                 logger.info(
@@ -262,6 +289,7 @@ class ChallengeSwarm:
 
             # Quota exhaustion: fall back to API-backed Pydantic AI solver
             if result.status == QUOTA_ERROR:
+                self._report_failure(model_spec, result.findings_summary or "quota error")
                 fallback_spec = _quota_fallback_spec(model_spec)
                 if fallback_spec:
                     logger.warning(
@@ -283,7 +311,13 @@ class ChallengeSwarm:
                     logger.warning(
                         f"[{self.meta.name}/{model_spec}] Broken (0 steps, $0) — not bumping"
                     )
+                    # 0 步直接失败 → 上报健康（可能模型一启动就挂：认证/模型名错/400）
+                    if result.status == ERROR:
+                        self._report_failure(model_spec, result.findings_summary or "start error")
                     break
+
+                # 有实际产出但没解出 → 模型本身可用，重置失败计数
+                self._report_success(model_spec)
 
                 # Track consecutive errors — stop after 3 in a row
                 if result.status == ERROR:

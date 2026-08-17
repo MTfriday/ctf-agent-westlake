@@ -64,6 +64,7 @@ class SolverRuntime:
     ) -> None:
         from backend.agents.coordinator_loop import _build_platform_client
         from backend.cost_tracker import CostTracker
+        from backend.model_health import ModelHealthRegistry
         from backend.models import resolve_model_specs
 
         self.settings = settings if settings is not None else _settings()
@@ -71,6 +72,8 @@ class SolverRuntime:
         self.store = store or BlackboardStore()
         self.cost_tracker = CostTracker()
         self.model_specs = resolve_model_specs(settings=self.settings)
+        # 运行中实时感知模型不可用并自动剔除（自动更换到其余模型）
+        self.model_health = ModelHealthRegistry()
         self.challenges_root = "challenges"
         self.no_submit = no_submit
         self.bus = EventBus()
@@ -95,6 +98,14 @@ class SolverRuntime:
             raise KeyError(f"Challenge {problem_id!r} not found on platform")
         self._challenge_cache[problem_id] = ch
         return ch
+
+    def get_active_model_specs(self) -> list[str]:
+        """返回当前可用的模型规格（剔除被健康注册表禁用的模型）。
+
+        运行中某模型失效（key 失效/模型下线/配额用尽/限流）会被实时剔除，
+        其余模型继续顶替求解；冷却期过后自动恢复尝试。
+        """
+        return self.model_health.active_specs(self.model_specs)
 
     async def launch_solver(
         self,

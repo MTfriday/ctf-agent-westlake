@@ -246,21 +246,38 @@ class SwarmEngineBackend(EngineBackend):
 
             trace_task = asyncio.create_task(_forward_trace(), name=f"trace-{run.run_id}")
 
+            # 实时健康感知：跳过当前被禁用的模型，只用可用模型求解
+            active_specs = self.runtime.get_active_model_specs()
+            if not active_specs:
+                # 全部被禁用 → 强制重置一次（可能是临时误判），否则直接失败
+                logger.warning("all models disabled — resetting health for %s", run.problem_id)
+                await self._emit(run, "所有模型均被禁用——重置健康状态后重试", "warn")
+                for spec in list(self.runtime.model_specs):
+                    self.runtime.model_health.reset(spec)
+                active_specs = self.runtime.get_active_model_specs()
+            if not active_specs:
+                raise RuntimeError("所有模型均不可用，无法求解（请检查 API key / 配额）")
+
             swarm = ChallengeSwarm(
                 challenge_dir=ch_dir,
                 meta=meta,
                 ctfd=platform,
                 cost_tracker=self.runtime.cost_tracker,
                 settings=self.runtime.settings,
-                model_specs=self.runtime.model_specs,
+                model_specs=active_specs,
                 no_submit=self.runtime.no_submit,
                 trace_sink=_trace_sink,
                 # 断点续传：把黑板上下文 + 操作员提示作为额外系统提示喂给 solver，
                 # 让新启动的 solver 知道之前的发现 / 死路 / 操作员意图。
                 extra_context=run.prompt,
+                # 实时健康感知：失败上报 → 自动剔除不可用模型，并通知前端
+                health=self.runtime.model_health,
+                on_model_disabled=lambda spec, detail: asyncio.create_task(
+                    self._emit(run, f"模型不可用，已自动剔除: {spec} — {detail}", "warn")
+                ),
             )
             self._swarms[run.problem_id] = swarm
-            await self._emit(run, f"swarm 已就绪（{len(self.runtime.model_specs)} 个模型）")
+            await self._emit(run, f"swarm 已就绪（{len(active_specs)} 个模型）")
 
             result = await swarm.run()
             if result and result.status == FLAG_FOUND:

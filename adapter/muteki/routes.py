@@ -604,11 +604,40 @@ async def kill_worker(run_id: str, request: Request, manager: Any = Depends(_man
 
 
 @router.get("/api/settings/worker-models")
-async def worker_models() -> Any:
-    return {"allow_custom": True, "models": {
-        "aemeath": [{"id": "qwen3.7-max", "label": "qwen3.7-max"},
-                    {"id": "qwen3.6-flash", "label": "qwen3.6-flash"}],
-    }}
+async def worker_models(runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    """返回当前求解器模型池 + 每模型健康状态（实时感知不可用模型）。"""
+    specs = list(runtime.model_specs)
+    health = runtime.model_health.status()
+    return {
+        "allow_custom": True,
+        "models": {
+            "aemeath": [
+                {
+                    "id": spec,
+                    "label": spec,
+                    "disabled": bool(health.get(spec, {}).get("disabled")),
+                    "health": health.get(spec, {}),
+                }
+                for spec in specs
+            ],
+        },
+    }
+
+
+@router.get("/api/settings/worker-model/health")
+async def worker_model_health(runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    """模型健康明细：每模型的禁用状态 / 失败计数 / 冷却剩余 / 最近错误。"""
+    return {
+        "active": runtime.get_active_model_specs(),
+        "models": runtime.model_health.status(),
+    }
+
+
+@router.post("/api/settings/worker-model/{model_id}/reset")
+async def worker_model_reset(model_id: str, runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    """手动恢复一个被禁用的模型（运维干预）。"""
+    runtime.model_health.reset(model_id)
+    return {"ok": True, "model": model_id}
 
 
 @router.get("/api/settings/worker-image")
