@@ -83,6 +83,7 @@ class ChallengeSwarm:
     _submit_count: dict[str, int] = field(default_factory=dict)  # per-model wrong submission count
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
     _last_submit_time: dict[str, float] = field(default_factory=dict)  # per-model last submit timestamp
+    _total_submits: int = 0  # 本题实际提交到平台的总次数（平台每题上限保护）
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
 
     def _create_solver(self, model_spec: str):
@@ -199,6 +200,15 @@ class ChallengeSwarm:
             if normalized in self._submitted_flags:
                 return "INCORRECT — already tried this exact flag.", False
 
+            # 平台规则：每题 flag 最大提交次数（超过后平台拒绝提交）
+            max_submit = getattr(self.settings, "flag_max_submit", 50)
+            if max_submit > 0 and self._total_submits >= max_submit:
+                return (
+                    f"STOP — 本题 flag 提交次数已达上限 {max_submit} 次，"
+                    "平台将拒绝后续提交。请停止盲目尝试，深入分析并仔细核对 flag。",
+                    False,
+                )
+
             # Escalating cooldown after incorrect submissions
             wrong_count = self._submit_count.get(model_spec, 0)
             cooldown_idx = min(wrong_count, len(self.SUBMISSION_COOLDOWNS) - 1)
@@ -216,6 +226,7 @@ class ChallengeSwarm:
                     )
 
             self._submitted_flags.add(normalized)
+            self._total_submits += 1
 
             from backend.tools.core import do_submit_flag
             display, is_confirmed = await do_submit_flag(self.ctfd, self.meta.name, flag)

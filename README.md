@@ -400,9 +400,16 @@ ctf-agent-westlake/
 flag:
   pattern: "FLAG\\{[A-F0-9]+\\}"   # 自定义正则
   min_length: 8
+  max_submit: 50                  # 每题最大提交次数（0=不限制）
 ```
 
 设为空字符串 `""` 可完全禁用校验。
+
+### 西湖论剑 flag 规则（slab 平台自动处理）
+
+- flag 格式为 `DASCTF{...}` 或 `flag{...}`，提交时**仅需提交 `{}` 内内容**。
+- 系统提交前会自动归一化（`normalize_flag`）剥掉 `DASCTF{}` / `flag{}` 外壳；`CTF{...}` 等其它外壳或题目自定义特殊格式原样保留。
+- 每题 flag **最大提交 50 次**，达到上限后系统会停止提交并提示求解器深入分析（`FLAG_MAX_SUBMIT` 可调，0=不限制）。
 
 ## 自定义平台 API
 

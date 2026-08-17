@@ -3,7 +3,7 @@
 from pydantic_ai import RunContext
 
 from backend.deps import SolverDeps
-from backend.flag_utils import validate_flag
+from backend.flag_utils import normalize_flag, validate_flag
 from backend.tools.core import do_submit_flag
 
 
@@ -15,7 +15,8 @@ async def submit_flag(ctx: RunContext[SolverDeps], flag: str) -> str:
 
     Flag format validation is configurable via flag_pattern and flag_min_length settings.
     """
-    flag = flag.strip()
+    # 平台规则：DASCTF{}/flag{} 只提交 {} 内内容 → 先归一化再校验/提交
+    flag = normalize_flag(flag)
 
     # Configurable flag validation
     pattern = getattr(ctx.deps, "flag_pattern", "")

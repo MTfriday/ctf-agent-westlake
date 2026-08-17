@@ -3,7 +3,7 @@
 按 AI Agent API 文档适配：
   Base:   {serverHost}/slab-match/api/v1/agent
   Auth:   Header `X-Agent-AccessKey`
-  响应:   统一信封 {code, message, data}，code=="00000" 成功
+  响应:   统一json {code, message, data}，code=="00000" 成功
 
 题目模型是「分类(category) → 子题(corpus)」两级：
   exercise-list 返回 [{id, name, corpus:[{id, name, ...}]}]
@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from backend.flag_utils import normalize_flag
 from backend.platforms.base import ChallengeInfo, PlatformClient, SubmitResult
 from backend.platforms.rate_limiter import RateLimiter
 
@@ -81,7 +82,7 @@ class SlabClient(PlatformClient):
     async def _request(
         self, method: str, path: str, *, json: dict | None = None, params: dict | None = None
     ) -> dict[str, Any]:
-        """发起请求并解统一信封。失败抛 RuntimeError(message)。"""
+        """发起请求并解统一json。失败抛 RuntimeError(message)。"""
         async with self.rate_limiter:
             client = await self._ensure_client()
             resp = await client.request(method, path, json=json, params=params)
@@ -283,9 +284,14 @@ class SlabClient(PlatformClient):
     # ── Flag 提交 ───────────────────────────────────────────────────────────
 
     async def submit_flag(self, challenge_id: str | int, flag: str) -> SubmitResult:
-        """提交 flag：POST answer-panel/answer → {isCorrect}。"""
+        """提交 flag：POST answer-panel/answer → {isCorrect}。
+
+        平台规则：flag 格式为 DASCTF{} / flag{}，提交时仅需提交 {} 内内容，
+        故先归一化（剥掉外壳）再提交。若有特殊格式要求题目会注明，
+        非 DASCTF/flag 外壳的 flag 原样保留。
+        """
         cid = str(challenge_id)
-        flag = flag.strip()
+        flag = normalize_flag(flag)
         if not flag:
             return SubmitResult("incorrect", "Empty flag", "Empty flag — nothing to submit.")
 

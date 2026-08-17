@@ -377,6 +377,26 @@ class TestFlagValidation:
         assert validate_flag("abc", min_length=5) is not None
         assert validate_flag("long_enough_flag", min_length=5) is None
 
+    def test_normalize_flag(self) -> None:
+        """Test flag normalization (submit only the content inside {})."""
+        from backend.flag_utils import normalize_flag
+
+        # 西湖论剑规则：DASCTF{} / flag{} 只提交内部内容
+        assert normalize_flag("DASCTF{abc123}") == "abc123"
+        assert normalize_flag("flag{xyz}") == "xyz"
+        assert normalize_flag("FLAG{XYZ}") == "XYZ"  # 大小写不敏感
+        # 裸内容原样返回
+        assert normalize_flag("abc123") == "abc123"
+        # 其他外壳（如 CTF{} / 题目自定义特殊格式）不剥壳
+        assert normalize_flag("CTF{keep}") == "CTF{keep}"
+        assert normalize_flag("special{abc}") == "special{abc}"
+        # 带空白归一化
+        assert normalize_flag("  DASCTF{hello}  ") == "hello"
+        # 内部含花括号（贪婪匹配到最后一个 }）
+        assert normalize_flag("DASCTF{a{b}c}") == "a{b}c"
+        # 空/无外壳
+        assert normalize_flag("") == ""
+
 
 # ── Sandbox Security Tests ───────────────────────────────────────────────────
 

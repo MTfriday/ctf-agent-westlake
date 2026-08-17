@@ -53,6 +53,7 @@ class YamlConfigSource(PydanticBaseSettingsSource):
         "flag": {
             "pattern": "flag_pattern",
             "min_length": "flag_min_length",
+            "max_submit": "flag_max_submit",
         },
         "rate_limit": {
             "enabled": "rate_limit_enabled",
@@ -204,6 +205,8 @@ class Settings(BaseSettings):
     # ========== Flag 配置（config.yaml flag.*）==========
     flag_pattern: str = ""  # Flag 校验正则（空=不校验）
     flag_min_length: int = 1
+    # 每题最大 flag 提交次数（平台规则：超过后无法提交；0=不限制）
+    flag_max_submit: int = 50
 
     # ========== 速率限制（config.yaml rate_limit.*）==========
     rate_limit_enabled: bool = True
