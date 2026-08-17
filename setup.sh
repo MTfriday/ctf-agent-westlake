@@ -55,25 +55,24 @@ if [ -z "$DOCKER" ]; then
 fi
 info "Found Docker: $("$DOCKER" --version)"
 
-# ── 2. Install Python dependencies ──────────────────────────────────────────
-info "Installing Python dependencies..."
-if [ "$PKG_MANAGER" = "uv" ]; then
-    $INSTALL_CMD
+# ── 1.5 Create/use virtual environment ──────────────────────────────────────
+if [ -x ".venv/bin/python" ]; then
+    info "Using existing virtual environment: .venv"
 else
-    # Generate requirements.txt from pyproject.toml if needed
-    if [ ! -f "requirements.txt" ]; then
-        warn "No requirements.txt found — generating from pyproject.toml..."
-        if command -v pip-compile &>/dev/null; then
-            pip-compile pyproject.toml -o requirements.txt
-        else
-            warn "Skipping requirements.txt generation (pip-compile not available)."
-            warn "Using pyproject.toml directly with pip:"
-            pip install -e .
-        fi
-    fi
-    if [ -f "requirements.txt" ]; then
-        $INSTALL_CMD
-    fi
+    info "Creating virtual environment (.venv)..."
+    "$PYTHON" -m venv .venv
+fi
+VENV_PY="$SCRIPT_DIR/.venv/bin/python"
+VENV_PIP="$SCRIPT_DIR/.venv/bin/pip"
+
+# ── 2. Install Python dependencies (into .venv) ─────────────────────────────
+info "Installing Python dependencies (into .venv)..."
+if [ "$PKG_MANAGER" = "uv" ]; then
+    # uv sync 自动使用/创建 .venv（pyproject.toml [tool.uv]）
+    uv sync
+else
+    "$VENV_PIP" install --upgrade pip
+    "$VENV_PIP" install -e .
 fi
 info "Dependencies installed."
 
@@ -86,6 +85,22 @@ if "$DOCKER" image inspect "$SANDBOX_IMAGE" &>/dev/null; then
 else
     "$DOCKER" build -f sandbox/Dockerfile.sandbox -t "$SANDBOX_IMAGE" .
     info "Sandbox image built."
+fi
+
+# ── 3.5 Install frontend dependencies ───────────────────────────────────────
+if [ -f "frontend/package.json" ]; then
+    if command -v npm &>/dev/null; then
+        if [ ! -d "frontend/node_modules" ]; then
+            info "Installing frontend dependencies (frontend/)..."
+            npm --prefix frontend install
+        else
+            info "frontend/node_modules already exists. Skip (reinstall: rm -rf frontend/node_modules)."
+        fi
+    else
+        warn "npm not found — skip frontend install (run later: npm --prefix frontend install)."
+    fi
+else
+    warn "frontend/package.json not found — skip frontend install."
 fi
 
 # ── 4. Create necessary directories ─────────────────────────────────────────
@@ -101,30 +116,19 @@ else
     info ".env already exists."
 fi
 
-# ── 6. Install dashboard dependencies ───────────────────────────────────────
-info "Installing dashboard dependencies..."
-if command -v streamlit &>/dev/null; then
-    info "Streamlit already installed."
-else
-    if [ "$PKG_MANAGER" = "uv" ]; then
-        uv pip install streamlit pyyaml httpx 2>/dev/null || true
-    else
-        pip install streamlit pyyaml httpx 2>/dev/null || true
-    fi
-    info "Dashboard dependencies installed."
-fi
+# ── 6. Dashboard ────────────────────────────────────────────────────────────
+# dashboard/server.py 基于 stdlib http.server，无额外依赖；驾驶舱是 frontend/（Next.js）
+info "Dashboard uses stdlib http.server — no extra Python deps needed."
 
 # ── Done ────────────────────────────────────────────────────────────────────
 echo ""
 info "${GREEN}✅ Setup complete!${NC}"
 echo ""
 echo "Quick start:"
-echo "  1. Edit .env with your API keys"
-echo "  2. Run:  python main.py --dashboard"
-echo "  3. Open http://localhost:8501 for the dashboard"
-echo ""
-echo "Or run without dashboard:"
-echo "  python main.py"
+echo "  1. Edit .env with your API keys (SLAB_ACCESS_KEY / DEEPSEEK_API_KEY / BAILIAN_API_KEY)"
+echo "  2. Run:  ./run.sh"
+echo "     (开发/联调 mock:  ./run.sh --mock)"
+echo "  3. Open http://127.0.0.1:3999 for the cockpit"
 echo ""
 echo "Run tests:"
-echo "  pytest tests/ -v"
+echo "  .venv/bin/python -m pytest tests/ -v"
