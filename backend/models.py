@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import boto3
+import httpx
 from pydantic_ai.models import Model
 from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
@@ -16,6 +17,26 @@ from pydantic_ai.settings import ModelSettings
 
 if TYPE_CHECKING:
     from backend.config import Settings
+
+
+class _TrimCompletionsTransport(httpx.AsyncBaseTransport):
+    """去掉 openai SDK 自动拼的 `/chat/completions`，把请求转发到完整网关端点。
+
+    西湖论剑 llm-gateway 代理给出的 base_url 本身就是完整的 Chat Completions
+    端点（POST 到该 URL 即完成对话），openai SDK 却会在其后拼接 `/chat/completions`
+    （`.../e/TOKEN/chat/completions` → 404）。此 transport 在转发前把拼接的路径段
+    去掉，使请求命中正确的代理端点。
+    """
+
+    def __init__(self) -> None:
+        self._transport = httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            request.url = request.url.copy_with(
+                path=request.url.path[: -len("/chat/completions")]
+            )
+        return await self._transport.handle_async_request(request)
 
 # Default model specs — claude-sdk and codex providers use the new solver backends
 DEFAULT_MODELS: list[str] = [
@@ -32,6 +53,8 @@ DEFAULT_MODELS: list[str] = [
 FALLBACK_MODELS: list[str] = [
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-pro",
+    "gateway/deepseek-v4-flash",
+    "gateway/deepseek-v4-pro",
     "bailian/qwen3.7-flash",
     "bailian/qwen3.7-plus",
     "bailian/qwen3.8-max",
@@ -62,6 +85,7 @@ def _provider_ready(spec: str, settings: Settings) -> bool:
     api_key_map: dict[str, str] = {
         "openai": settings.openai_api_key,
         "deepseek": settings.deepseek_api_key,
+        "gateway": settings.gateway_api_key,
         "bailian": settings.bailian_api_key,
         "azure": settings.azure_openai_api_key,
         "zen": settings.opencode_zen_api_key,
@@ -197,6 +221,20 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                     api_key=settings.deepseek_api_key,
                 ),
             )
+        case "gateway":
+            # 平台 LLM 网关代理（西湖论剑 llm-gateway 代理的 DeepSeek）
+            # base_url 是"完整 Chat Completions 端点"，openai SDK 会在其后拼
+            # /chat/completions → 404，必须用 _TrimCompletionsTransport 去掉该路径段。
+            return OpenAIChatModel(
+                model_id,
+                provider=OpenAIProvider(
+                    base_url=settings.gateway_base_url,
+                    api_key=settings.gateway_api_key,
+                    http_client=httpx.AsyncClient(
+                        transport=_TrimCompletionsTransport()
+                    ),
+                ),
+            )
         case "bailian":
             # 阿里百炼 — OpenAI 兼容接口
             return OpenAIChatModel(
@@ -237,6 +275,13 @@ def resolve_model_settings(spec: str) -> ModelSettings:
             # "Thinking mode does not support this tool_choice"）。我们的 coordinator
             # 和 solver 都是工具调用型 agent，pydantic-ai 在需要强制工具时会发
             # tool_choice='required'，因此必须通过 reasoning_effort='none' 关闭思考。
+            return OpenAIChatModelSettings(
+                max_tokens=128_000,
+                openai_reasoning_effort="none",
+            )
+        case "gateway":
+            # 平台网关代理的 DeepSeek 与直连 DeepSeek 行为一致：思考模式与
+            # tool_choice='required' 冲突，需用 reasoning_effort='none' 关闭思考。
             return OpenAIChatModelSettings(
                 max_tokens=128_000,
                 openai_reasoning_effort="none",

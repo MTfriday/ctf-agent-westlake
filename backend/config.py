@@ -168,6 +168,11 @@ class Settings(BaseSettings):
     bailian_api_key: str = ""
     bailian_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
+    # 平台 LLM 网关代理（西湖论剑 llm-gateway 代理的 DeepSeek，SECRET，来自 .env）
+    # 注意：该 base_url 是"完整 Chat Completions 端点"，openai SDK 不会（也不能）再拼 /chat/completions。
+    gateway_base_url: str = ""
+    gateway_api_key: str = ""
+
     # Provider-specific (optional, for Bedrock/Azure/Zen fallback)
     aws_region: str = "us-east-1"
     aws_bearer_token: str = ""

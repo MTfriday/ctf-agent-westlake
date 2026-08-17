@@ -18,6 +18,7 @@ PROVIDER_MAP: dict[str, str] = {
     "azure": "openai",
     "zen": "openai",
     "deepseek": "openai",
+    "gateway": "openai",
     "bailian": "openai",
     "codex": "openai",
     "google": "google",

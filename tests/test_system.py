@@ -589,7 +589,7 @@ class TestUnifiedConfig:
         s = Settings()
         # These come from config.yaml (currently slab/WestLake mode)
         assert s.platform_type == "slab"
-        assert s.platform_api_base_url == "https://slab.example.com"
+        assert s.platform_api_base_url == "https://pro.dasctf.com"
         assert s.slab_access_key_env == "SLAB_ACCESS_KEY"
         assert s.rate_limit_rps == 5
         assert s.sandbox_image == "ctf-sandbox"
