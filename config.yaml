@@ -34,7 +34,7 @@ llm:
   bailian:
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     # API Key 通过环境变量 BAILIAN_API_KEY 设置
-    default_model: "qwen-max"
+    default_model: "qwen3.7-plus"
 
   # 其他 LLM 提供商通过 .env 配置
 
@@ -94,7 +94,7 @@ dashboard:
 # ========== Aemeath 执行层适配器 ==========
 adapter:
   host: "127.0.0.1"
-  port: 12345   # 8001 在部分 Windows 被排除端口段保留（WinError 10013）无法 bind，故用 12345
+  port: 12346   # 8001/12345 在部分 Windows 落入排除端口段（WinError 10013）无法 bind，故用 12346
   # 引擎后端: "swarm"（真实求解）| "mock"（联调/测试，无需平台与 LLM）
   engine_backend: "swarm"
   # 全自动求解: true=启动后自动扫描未解出题目并发起求解（跳过已解出，避免浪费 token）
@@ -106,9 +106,9 @@ adapter:
 orchestrator:
   enabled: true
   # 主力规划模型（百炼 qwen；未配 BAILIAN_API_KEY 时自动回退规则）
-  main_model: "qwen3.7-max"
+  main_model: "qwen3.8-max"
   # 模式路由模型
-  router_model: "qwen3.6-flash"
+  router_model: "qwen3.7-flash"
   max_intents: 4                  # 每轮最多生成 Intent 数
   intent_timeout_seconds: 120     # Intent 执行超时（秒）
   observe_interval_seconds: 10    # OODA 轮询间隔（秒）

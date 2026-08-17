@@ -110,7 +110,7 @@ function Deck() {
     const url = urlForRun(runId);
     if (window.location.pathname !== url) window.history.replaceState({}, "", url);
   }, [runId]);
-  const { deck, connected, start, sendHitl, resolve } = useRun(runId);
+  const { deck, connected, start, sendHitl, resolve, writeup } = useRun(runId);
 
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [railWidth, setRailWidth] = useState(RAIL_WIDTH_DEFAULT);
@@ -573,6 +573,7 @@ function Deck() {
           connected={connected}
           onCommand={onCommand}
           onResolve={resolve}
+          onWriteup={writeup}
           onDispatch={dispatch}
           attachments={attachments}
           onAddFiles={addFiles}

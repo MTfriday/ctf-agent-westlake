@@ -6,7 +6,7 @@
 启动::
 
     python -m adapter                 # 读取 config.yaml / .env 配置
-    uvicorn adapter.main:app --port 12345
+    uvicorn adapter.main:app --port 12346
 """
 
 from adapter.main import create_app

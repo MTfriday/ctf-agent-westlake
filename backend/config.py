@@ -215,9 +215,9 @@ class Settings(BaseSettings):
 
     # ========== Aemeath 执行层适配器（config.yaml adapter.*）==========
     adapter_host: str = "127.0.0.1"
-    # 注意：8001 在部分 Windows 上落在 Hyper-V/WSL 排除端口段（WinError 10013）无法 bind，
-    # 故默认用 12345（可用端口）。如需其他端口改 config.yaml adapter.port。
-    adapter_port: int = 12345
+    # 注意：8001/12345 在部分 Windows 上落在 Hyper-V/WSL 排除端口段（WinError 10013）无法 bind，
+    # 故默认用 12346（可用端口）。如需其他端口改 config.yaml adapter.port。
+    adapter_port: int = 12346
     adapter_engine_backend: str = "swarm"  # "swarm" | "mock"
     # 全自动求解：启动后自动扫描未解出题目并发起求解（跳过已解出，避免浪费 token）
     adapter_auto_solve: bool = True
@@ -226,8 +226,8 @@ class Settings(BaseSettings):
 
     # ========== Aemeath 总控（config.yaml orchestrator.*）==========
     orchestrator_enabled: bool = True
-    orchestrator_main_model: str = "qwen3.7-max"
-    orchestrator_router_model: str = "qwen3.6-flash"
+    orchestrator_main_model: str = "qwen3.8-max"
+    orchestrator_router_model: str = "qwen3.7-flash"
     orchestrator_max_intents: int = 4
     orchestrator_intent_timeout_seconds: int = 120
     orchestrator_observe_interval_seconds: int = 10

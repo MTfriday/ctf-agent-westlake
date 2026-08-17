@@ -4,7 +4,7 @@
      start → SSE 事件流(含 flag) / hitl / credentials / workers / btw(SSE) /
      terminal(WS) / auth。
 
-自包含：若 12345 空闲则自行启动 uvicorn（scripts/run_muteki_dev.py），测完关闭；
+自包含：若 12346 空闲则自行启动 uvicorn（scripts/run_muteki_dev.py），测完关闭；
       若已被占用（dev 服务在跑）则直接复用，不关闭。
 
 用法: .venv\\Scripts\\python.exe scripts\\integration_test.py
@@ -23,8 +23,8 @@ import time
 import httpx
 import websockets
 
-BASE = "http://127.0.0.1:12345"
-WS_BASE = "ws://127.0.0.1:12345"
+BASE = "http://127.0.0.1:12346"
+WS_BASE = "ws://127.0.0.1:12346"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -60,7 +60,7 @@ def main() -> int:
     proc: subprocess.Popen | None = None
     started_server = False
 
-    if _port_free(12345):
+    if _port_free(12346):
         # 自行启动 uvicorn
         proc = subprocess.Popen(
             [sys.executable, os.path.join("scripts", "run_muteki_dev.py")],

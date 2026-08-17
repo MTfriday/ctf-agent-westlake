@@ -11,7 +11,7 @@
     ── muteki 契约（frontend/ 直连）──
     /api/runs* /api/folders* /api/auth/* /api/engines* /api/settings/*
 
-启动: `python -m adapter` 或 `uvicorn adapter.main:app --port 12345`
+启动: `python -m adapter` 或 `uvicorn adapter.main:app --port 12346`
 """
 
 from __future__ import annotations

@@ -44,7 +44,7 @@ class OpenAICompatLLM:
         self,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        model: str = "qwen3.7-max",
+        model: str = "qwen3.8-max",
         timeout: float = 30.0,
     ) -> None:
         self.base_url = (base_url or _DEFAULT_BASE_URL).rstrip("/")

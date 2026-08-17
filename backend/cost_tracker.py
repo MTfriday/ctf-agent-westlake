@@ -83,6 +83,21 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
         "output": 2.19,
     },
     # 阿里百炼通义千问系列定价
+    "qwen3.8-max": {
+        "input": 3.00,
+        "cached_input": 0.30,
+        "output": 15.00,
+    },
+    "qwen3.7-plus": {
+        "input": 0.80,
+        "cached_input": 0.08,
+        "output": 3.20,
+    },
+    "qwen3.7-flash": {
+        "input": 0.30,
+        "cached_input": 0.03,
+        "output": 1.20,
+    },
     "qwen-max": {
         "input": 2.00,
         "cached_input": 0.20,

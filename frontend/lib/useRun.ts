@@ -293,7 +293,27 @@ export function useRun(runId: string) {
     [runId]
   );
 
-  return { deck, connected, start, sendHitl, resolve };
+  // 生成解题报告（writeup）：调后端端点，成功后把 Markdown 注入主对话区。
+  const writeup = useCallback(async (): Promise<{ ok: boolean; source?: string; error?: string }> => {
+    const res = await generateWriteup(runId);
+    if (res.ok && res.markdown) {
+      // 构造 text.delta 事件，solver 归到协调器，main_thread 使报告显示在主对话
+      const ev: MutekiEvent = {
+        event_type: EventType.TEXT_MESSAGE_DELTA,
+        seq: Date.now(),
+        ts: Date.now() / 1000,
+        run_id: runId,
+        challenge_id: runId,
+        solver_id: "reason",
+        payload: { text: res.markdown, main_thread: true },
+      };
+      setDeck((prev) => reduce(prev, ev));
+      return { ok: true, source: res.source };
+    }
+    return { ok: false, error: res.error };
+  }, [runId]);
+
+  return { deck, connected, start, sendHitl, resolve, writeup };
 }
 
 /**
@@ -418,6 +438,17 @@ export async function openWorkspace(runId: string): Promise<boolean> {
     return !!j.ok;
   } catch {
     return false;
+  }
+}
+
+/** Generate a solve writeup (Markdown) for a finished run. Returns {markdown, source}. */
+export async function generateWriteup(runId: string): Promise<{ ok: boolean; markdown?: string; source?: string; error?: string }> {
+  try {
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/writeup`, { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    return { ok: !!j.ok, markdown: j.markdown, source: j.source, error: j.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
   }
 }
 

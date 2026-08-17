@@ -526,6 +526,25 @@ async def run_credentials(run_id: str, manager: Any = Depends(_manager)) -> Any:
     return {"credentials": creds}
 
 
+@router.post("/api/runs/{run_id}/writeup")
+async def run_writeup(run_id: str, manager: Any = Depends(_manager)) -> Any:
+    """生成该 run 的解题报告（writeup）。LLM 润色，失败回退规则拼接。"""
+    entry = manager.get(run_id)
+    if entry is None:
+        return {"ok": False, "error": "run not found"}
+    from adapter.muteki.writeup import generate_writeup
+
+    try:
+        result = await generate_writeup(manager.runtime, run_id, entry)
+        result["run_id"] = run_id
+        return result
+    except Exception as e:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).exception("writeup %s failed", run_id)
+        return {"ok": False, "error": str(e)}
+
+
 _TERM_ALLOWED = {"help", "echo", "date", "whoami", "pwd", "ls"}
 
 

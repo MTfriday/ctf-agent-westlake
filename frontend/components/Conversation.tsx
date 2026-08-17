@@ -1190,6 +1190,7 @@ export function Conversation({
   onCommand,
   onResolve,
   onDispatch,
+  onWriteup,
   attachments,
   onAddFiles,
   onRemoveFile,
@@ -1213,6 +1214,7 @@ export function Conversation({
   onCommand: (target: string, action: string, text: string) => void;
   onResolve: (text?: string) => void;
   onDispatch: (prompt: string, opts: DispatchOpts) => void;
+  onWriteup?: () => void;
   attachments: SavedFile[];
   onAddFiles: (files: FileList | File[]) => void;
   onRemoveFile: (path: string) => void;
@@ -1318,7 +1320,7 @@ export function Conversation({
   // F: only blocking (external_blocker) hand-raises pause the swarm — the hero/flow
   // counts must reflect those, not auto-resolving informational cards.
   const blockingHitlCount = deck.hitlRequests.filter((r) => (r.pausesBehavior ?? true)).length;
-  const onWriteup = () => onCommand("global", "writeup", "");
+  const doWriteup = onWriteup ?? (() => onCommand("global", "writeup", ""));
   const onMarkFalseFlag = (flag: string) => onCommand("global", "mark_false", flag);
   // Before a solve is dispatched the deck is a local draft with no backend run,
   // so useRun opens no SSE stream by design — that's "idle", not "disconnected".
@@ -1492,7 +1494,7 @@ export function Conversation({
                 onSpawnWorker={onSpawnWorker}
                 onKillWorker={onKillWorker}
                 onOpenWorker={onOpenWorker}
-                onWriteup={onWriteup}
+                onWriteup={doWriteup}
                 onMarkFalseFlag={onMarkFalseFlag}
               />
             )}

@@ -38,10 +38,10 @@ function Test-Port([int]$Port) {
 
 # ── 启动后端 adapter ────────────────────────────────────────────────────────
 if (-not $FrontendOnly) {
-    if (Test-Port 12345) {
-        Warn "端口 12345 已被占用 — adapter 可能已在运行，跳过启动。"
+    if (Test-Port 12346) {
+        Warn "端口 12346 已被占用 — adapter 可能已在运行，跳过启动。"
     } else {
-        Info "启动后端 adapter（:12345）..."
+        Info "启动后端 adapter（:12346）..."
         if ($Mock) {
             Info "模式: mock（开发/联调，无需平台/LLM/Docker）"
             $BackendCmd = "& '$VenvPy' scripts\run_muteki_dev.py"
@@ -57,11 +57,11 @@ if (-not $FrontendOnly) {
         for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 1
             try {
-                $h = Invoke-RestMethod -Uri "http://127.0.0.1:12345/api/health" -TimeoutSec 2
+                $h = Invoke-RestMethod -Uri "http://127.0.0.1:12346/api/health" -TimeoutSec 2
                 if ($h.status -eq "ok") { $ready = $true; break }
             } catch { }
         }
-        if ($ready) { Info "✅ adapter 就绪: http://127.0.0.1:12345 (engine=$($h.engine))" }
+        if ($ready) { Info "✅ adapter 就绪: http://127.0.0.1:12346 (engine=$($h.engine))" }
         else { Warn "adapter 启动超时 — 请检查新开窗口中的日志。" }
     }
 }
@@ -76,11 +76,10 @@ if (-not $BackendOnly) {
             exit 1
         }
         Info "启动前端驾驶舱（:3999）..."
-        $env:NEXT_PUBLIC_MUTEKI_API = "http://127.0.0.1:12345"
+        # NEXT_PUBLIC_MUTEKI_API 留空 → 前端走相对路径 /api，经 Next rewrite 代理到 adapter
         $FrontendCmd = "npm --prefix '$Root\frontend' run dev"
         Start-Process powershell -ArgumentList @(
-            "-NoExit", "-ExecutionPolicy", "Bypass", "-Command",
-            "`$env:NEXT_PUBLIC_MUTEKI_API='http://127.0.0.1:12345'; $FrontendCmd"
+            "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $FrontendCmd
         )
         # 等前端就绪（最多 60s）
         $ready = $false
