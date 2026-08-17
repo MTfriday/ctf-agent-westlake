@@ -96,8 +96,8 @@ dashboard:
 adapter:
   host: "127.0.0.1"
   port: 12346   # 8001/12345 在部分 Windows 落入排除端口段（WinError 10013）无法 bind，故用 12346
-  # 引擎后端: "swarm"（真实求解）| "mock"（联调/测试，无需平台与 LLM）
-  engine_backend: "swarm"
+  # 引擎后端: "swarm"（纯竞速）| "hybrid"（竞速 + OODA 总控/黑板）| "orchestrated"（同 hybrid）| "mock"（联调/测试）
+  engine_backend: "hybrid"
   # 全自动求解: true=启动后自动扫描未解出题目并发起求解（跳过已解出，避免浪费 token）
   auto_solve: true
   # 自动求解轮询间隔（秒）——定期检测平台新题 / 解出状态

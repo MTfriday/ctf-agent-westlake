@@ -54,6 +54,7 @@ class TracingToolset(WrapperToolset[SolverDeps]):
     tracer: SolverTracer = field(repr=False)
     loop_detector: LoopDetector = field(repr=False)
     step_counter: list[int] = field(repr=False)
+    activity: list[str] = field(default_factory=list, repr=False)  # 工具活动摘要（供黑板沉淀）
 
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[SolverDeps], tool: ToolsetTool[SolverDeps]
@@ -76,6 +77,37 @@ class TracingToolset(WrapperToolset[SolverDeps]):
         result_str = str(result) if result is not None else ""
         self.tracer.tool_result(name, result_str, step)
 
+        # 记录工具活动摘要（供 hybrid 黑板沉淀 / 断点续传）
+        arg_preview = _summarize_args(tool_args)
+        result_head = result_str.split("\n")[0][:120] if result_str else ""
+        self.activity.append(f"[{step}] {name} {arg_preview}" + (f" → {result_head}" if result_head else ""))
+        # 只保留最近 40 条
+        if len(self.activity) > 40:
+            del self.activity[:-40]
+
+        # hybrid 实时沉淀：每 8 步把最近活动写入共享黑板（不等整轮结束）
+        store = getattr(ctx.deps, "store", None)
+        if store is not None and step % 8 == 0:
+            try:
+                summary = "\n".join(self.activity[-8:])
+                if summary:
+                    store.add_discovery(
+                        ctx.deps.challenge_name,
+                        f"[{ctx.deps.model_spec}] {summary[:300]}",
+                        source=f"solver:{ctx.deps.model_spec}",
+                    )
+                    on_bb = getattr(ctx.deps, "on_blackboard_update", None)
+                    if on_bb is not None:
+                        try:
+                            await on_bb("discovery")
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[%s/%s] 黑板实时沉淀失败: %s",
+                    ctx.deps.challenge_name, ctx.deps.model_spec, e,
+                )
+
         # Inject loop warning alongside result on "warn" level
         if loop_status == "warn":
             result = f"{result}\n\n{LOOP_WARNING_MESSAGE}" if isinstance(result, str) else result
@@ -94,12 +126,30 @@ class TracingToolset(WrapperToolset[SolverDeps]):
         return result
 
 
+def _summarize_args(tool_args: dict[str, Any]) -> str:
+    """把工具参数压缩成一行摘要（命令/路径/URL 等）。"""
+    try:
+        for key in ("command", "path", "url", "file_path"):
+            if key in tool_args:
+                val = str(tool_args[key])[:100]
+                return f"{key}={val!r}"
+        # 其它：取前两个键值对
+        parts = [f"{k}={str(v)[:60]}" for k, v in list(tool_args.items())[:2]]
+        return " ".join(parts) if parts else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _build_toolset(deps: SolverDeps) -> FunctionToolset[SolverDeps]:
     """Build the raw toolset for a solver agent."""
     tools = [bash, read_file, write_file, list_files, submit_flag, web_fetch,
              webhook_create, webhook_get_requests, check_findings, notify_coordinator]
     if deps.use_vision:
         tools.append(view_image)
+    # hybrid 模式：接入黑板时给 solver 读写共享黑板的能力
+    if getattr(deps, "store", None) is not None:
+        from backend.tools.blackboard import blackboard_read, blackboard_write
+        tools += [blackboard_read, blackboard_write]
     return FunctionToolset(tools=tools, max_retries=4)
 
 
@@ -155,6 +205,13 @@ class Solver:
         self._flag: str | None = None
         self._confirmed: bool = False
         self._findings: str = ""
+        self._activity: list[str] = []  # 工具活动摘要（hybrid 黑板沉淀用）
+
+    def recent_activity(self, last: int = 12) -> str:
+        """最近工具活动摘要（供黑板沉淀 / 断点续传 / writeup）。"""
+        if not self._activity:
+            return ""
+        return "\n".join(self._activity[-last:])
 
     async def start(self) -> None:
         """Start the sandbox and build the agent."""
@@ -182,6 +239,7 @@ class Solver:
             loop_detector=self.loop_detector,
             step_counter=self._step_count,
         )
+        self._activity = toolset.activity  # 保留引用供 recent_activity() 读取
 
         self._agent = Agent(
             model,
@@ -243,6 +301,9 @@ class Solver:
                         input_tokens=msg_usage.input_tokens if msg_usage else 0,
                         output_tokens=msg_usage.output_tokens if msg_usage else 0,
                     )
+                    # 累积 findings：模型本轮推理 → 共享黑板/兄弟 solver（供 hybrid 沉淀）
+                    if text and len(self._findings) < 1800:
+                        self._findings = (self._findings + "\n" + text).strip()[:1800]
 
             output = result.output
             if isinstance(output, FlagFound):

@@ -195,7 +195,7 @@ class SwarmEngineBackend(EngineBackend):
         run.task = asyncio.create_task(self._run_swarm(run), name=f"swarm-{run.run_id}")
         return run.run_id
 
-    async def _run_swarm(self, run: RunRecord) -> None:
+    async def _run_swarm(self, run: RunRecord, *, use_blackboard: bool = False) -> None:
         trace_task: Optional[asyncio.Task] = None
         try:
             await self._emit(run, f"[swarm:{run.mode}] 启动真实求解引擎")
@@ -275,6 +275,14 @@ class SwarmEngineBackend(EngineBackend):
                 on_model_disabled=lambda spec, detail: asyncio.create_task(
                     self._emit(run, f"模型不可用，已自动剔除: {spec} — {detail}", "warn")
                 ),
+                # hybrid 模式：solver 读写共享黑板，发现沉淀 + 前端实时广播
+                store=(self.runtime.store if use_blackboard else None),
+                on_fact_added=(
+                    (lambda kind: asyncio.create_task(
+                        self._broadcast_blackboard(run, kind)
+                    ))
+                    if use_blackboard else None
+                ),
             )
             self._swarms[run.problem_id] = swarm
             await self._emit(run, f"swarm 已就绪（{len(active_specs)} 个模型）")
@@ -350,6 +358,26 @@ class SwarmEngineBackend(EngineBackend):
             logger.warning("start_environment failed for %s: %s", ch.get("name"), e)
         return ""
 
+    async def _broadcast_blackboard(self, run: RunRecord, kind: str) -> None:
+        """solver 写入黑板后：把最新 discovery 广播为带 fact 的 BLACKBOARD_DELTA，
+        供 bridge 转成前端 fact_added（知识黑板/证据链面板实时更新）。"""
+        try:
+            facts = self.runtime.store.list_facts(run.problem_id, type="discovery", limit=1)
+            if facts:
+                f = facts[0]
+                await self.runtime.bus.publish(
+                    ev(EventType.BLACKBOARD_DELTA, problem_id=run.problem_id,
+                       kind="discovery", fact=str(f.get("content") or ""),
+                       source=str(f.get("source") or "solver"))
+                )
+            else:
+                # 无 discovery 时也广播（intent/其它 kind 直接透传）
+                await self.runtime.bus.publish(
+                    ev(EventType.BLACKBOARD_DELTA, problem_id=run.problem_id, kind=kind)
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("broadcast blackboard %s failed: %s", run.problem_id, e)
+
     async def status(self, run_id: str) -> Optional[dict[str, Any]]:
         base = await super().status(run_id)
         if base is None:
@@ -368,8 +396,118 @@ class SwarmEngineBackend(EngineBackend):
         return await super().stop(run_id)
 
 
+class HybridEngineBackend(SwarmEngineBackend):
+    """混合引擎 — 竞速 swarm + 总控 OODA 编排（黑板驱动的 hybrid 模式）。
+
+    相比纯 swarm（只并行 solver 竞速、不读黑板），hybrid 额外：
+      1. 启动该题的 OODA 编排器（src/orchestrator）：每轮 Reason/Decide
+         用主力 LLM 规划 intent 写入黑板（pending），Dispatcher 处理超时/死路。
+      2. solver 接入共享黑板：可调 blackboard_read/write 读写，发现自动
+         沉淀为黑板 discovery，死路由 solver/调度器 mark_deadend。
+      3. 黑板上下文在每轮注入 solver prompt（extra_context 断点续传）。
+      4. solver 卡住时，黑板里的 intent 提供下一轮行动方向。
+
+    运行流：swarm 并行求解（快） + OODA 规划（持续补充方向）双轨推进；
+    任一 solver 解出即停（flag 提交门禁统一在 ChallengeSwarm）。
+    """
+
+    async def launch(
+        self,
+        problem_id: str,
+        *,
+        prompt: str = "",
+        target: str = "",
+        attachments: Optional[list[str]] = None,
+        mode: str = "auto",
+    ) -> str:
+        run = self._new_run(problem_id, mode)
+        run.prompt = prompt
+        run.status = "running"
+        await self.runtime.bus.publish(
+            ev(EventType.RUN_STARTED, run_id=run.run_id, problem_id=problem_id, mode=mode)
+        )
+        # 后台任务：solver 竞速 + OODA 编排协同推进
+        run.task = asyncio.create_task(
+            self._run_hybrid(run), name=f"hybrid-{run.run_id}"
+        )
+        return run.run_id
+
+    async def _run_hybrid(self, run: RunRecord) -> None:
+        ooda_task: Optional[asyncio.Task] = None
+        try:
+            await self._emit(run, "[hybrid] 启动混合引擎：竞速 swarm + OODA 总控")
+
+            # 1. 启动 OODA 编排器（黑板驱动规划；hybrid 模式 → 生成 intent 指导 worker）
+            try:
+                await self.runtime.orchestrator.start(
+                    run.problem_id, mode="hybrid"
+                )
+                ooda_task = asyncio.create_task(
+                    self._monitor_ooda(run), name=f"ooda-monitor-{run.run_id}"
+                )
+                await self._emit(run, "[hybrid] OODA 总控已启动（黑板规划中）")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("hybrid OODA start failed for %s: %s", run.problem_id, e)
+                await self._emit(run, f"[hybrid] OODA 启动失败，退化为 swarm: {e}", "warn")
+
+            # 2. 竞速求解（黑板模式：solver 读写黑板）
+            await self._run_swarm(run, use_blackboard=True)
+
+            # 3. 解出/失败后停止 OODA
+            if ooda_task is not None:
+                ooda_task.cancel()
+                try:
+                    await ooda_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            try:
+                await self.runtime.orchestrator.stop(run.problem_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("hybrid OODA stop failed: %s", e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("hybrid run crashed for %s", run.problem_id)
+            if run.status == "running":
+                run.status = "failed"
+                run.error = str(e)
+                run.finished_at = time.time()
+                await self.runtime.bus.publish(
+                    ev(EventType.RUN_FINISHED, run_id=run.run_id,
+                       problem_id=run.problem_id, status="failed", error=str(e))
+                )
+
+    async def _monitor_ooda(self, run: RunRecord) -> None:
+        """把 OODA 每轮状态/模式变化转发为 ENGINE_LOG（前端时间线可见）。"""
+        from src.orchestrator import MODES, MODE_LABEL
+        last: Optional[str] = None
+        try:
+            while True:
+                await asyncio.sleep(self.runtime.settings.orchestrator_observe_interval_seconds or 10)
+                sched = self.runtime.orchestrator.get_scheduler(run.problem_id)
+                if sched is None:
+                    continue
+                st = sched.status_dict()
+                mode = st.get("current_mode", "")
+                label = MODE_LABEL.get(mode, mode)
+                if mode != last:
+                    last = mode
+                    await self._emit(
+                        run,
+                        f"[hybrid] OODA 第 {st.get('current_cycle', 0)} 轮 · 模式 {label}"
+                        f" · {st.get('mode_reason', '')}",
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning("hybrid ooda monitor %s: %s", run.problem_id, e)
+
+
 def build_engine_backend(runtime: Any, name: str) -> EngineBackend:
     """按名称构建引擎后端（adapter_engine_backend 配置项）。"""
     if name == "mock":
         return MockEngineBackend(runtime)
+    if name in ("hybrid", "orchestrated"):
+        # hybrid = 竞速 + 总控；orchestrated 目前也走 hybrid（总控驱动的完整编排）
+        return HybridEngineBackend(runtime)
     return SwarmEngineBackend(runtime)

@@ -34,6 +34,10 @@ class SolverDeps:
     no_submit: bool = False
     notify_coordinator: Callable[[str], Coroutine[Any, Any, None]] | None = None
     flag_pattern: str = ""  # Optional regex for flag validation
+    # 黑板 store（hybrid 模式：solver 读写共享黑板）。None 表示不接入黑板。
+    store: Any = None
+    # solver 实时写入黑板后回调（供引擎广播 BLACKBOARD_DELTA → 前端），签名 on_bb(kind)
+    on_blackboard_update: Callable[[str], Coroutine[Any, Any, None]] | None = None
 
 
 @dataclass

@@ -64,6 +64,10 @@ class ChallengeSwarm:
     health: Any = None
     # 模型被禁用时回调（供 adapter 转发 ENGINE_LOG 到前端），签名 on_disabled(spec, detail)
     on_model_disabled: Callable[[str, str], None] | None = None
+    # 共享黑板 store（hybrid 模式）；None 表示 swarm 纯竞速不接黑板
+    store: Any = None
+    # solver 写入黑板事实后回调（供 adapter 广播 BLACKBOARD_DELTA），签名 on_fact(kind)
+    on_fact_added: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         """Resolve model specs from settings if not explicitly provided."""
@@ -167,6 +171,10 @@ class ChallengeSwarm:
         solver.deps.no_submit = self.no_submit
         solver.deps.submit_fn = lambda flag: self.try_submit_flag(flag, model_spec)
         solver.deps.notify_coordinator = self._make_notify_fn(model_spec)
+        # hybrid 模式：把共享黑板注入 solver（工具集据此注册 blackboard_read/write）
+        solver.deps.store = self.store
+        if self.on_fact_added is not None:
+            solver.deps.on_blackboard_update = lambda kind: self.on_fact_added(kind)
         return solver
 
     def _gather_sibling_insights(self, exclude_model: str) -> str:
@@ -274,6 +282,31 @@ class ChallengeSwarm:
                     and not result.findings_summary.startswith(("Error:", "Turn failed:"))):
                 self.findings[model_spec] = result.findings_summary
                 await self.message_bus.post(model_spec, result.findings_summary[:500])
+
+            # hybrid 模式：solver 本轮进展沉淀到共享黑板（discovery）
+            if self.store is not None:
+                try:
+                    activity = ""
+                    try:
+                        activity = solver.recent_activity()
+                    except Exception:  # noqa: BLE001
+                        activity = ""
+                    if activity:
+                        self.store.add_discovery(
+                            self.meta.name,
+                            f"[{model_spec}] {activity[:400]}",
+                            source=f"solver:{model_spec}",
+                        )
+                        if self.on_fact_added is not None:
+                            self.on_fact_added("discovery")
+                        logger.info(
+                            "[%s/%s] 黑板沉淀 discovery（%d chars）",
+                            self.meta.name, model_spec, len(activity),
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[%s/%s] 黑板写入失败: %s", self.meta.name, model_spec, e
+                    )
 
             if result.status == FLAG_FOUND:
                 self._report_success(model_spec)
