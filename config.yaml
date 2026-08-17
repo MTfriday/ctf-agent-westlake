@@ -3,13 +3,19 @@
 
 # ========== 比赛平台 API ==========
 platform:
-  # 平台类型: "generic" | "ctfd" | "ctf2" | "gzctf"
-  type: "gzctf"
+  # 平台类型: "generic" | "ctfd" | "ctf2" | "gzctf" | "slab"
+  type: "slab"
 
-  # ===== GZCTF 配置 (type=gzctf) =====
+  # ===== 西湖论剑 slab-match (type=slab) =====
+  # AI Agent API: {host}/slab-match/api/v1/agent
+  # AccessKey 从 .env 读取：SLAB_ACCESS_KEY（X-Agent-AccessKey header）
+  api_base_url: "https://slab.example.com"   # 西湖论剑服务器地址
+  access_key_env: "SLAB_ACCESS_KEY"
+
+  # ===== GZCTF 配置 (type=gzctf) =====（切回时取消注释并改 type）
   # 凭据从 .env 读取：GZCTF_USERNAME / GZCTF_PASSWORD（会话登录）或 GZCTF_TOKEN（推荐）
-  auth_type: "Bearer"
-  api_base_url: "http://150.158.131.227:65534"   # GZCTF 基础URL
+  # auth_type: "Bearer"
+  # api_base_url: "http://150.158.131.227:65534"   # GZCTF 基础URL
 
   # ===== CTF2 配置 (type=ctf2) =====
   # 认证方式（推荐：ApiKey → X-CTF2-API-Key header）

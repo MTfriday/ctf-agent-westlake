@@ -23,6 +23,8 @@ def _platform_label(settings: Settings) -> str:
         return f"CTF2 ({settings.platform_api_base_url}{settings.platform_api_path})"
     if ptype == "gzctf":
         return f"GZCTF ({settings.platform_api_base_url})"
+    if ptype == "slab":
+        return f"Slab/西湖论剑 ({settings.platform_api_base_url})"
     if ptype == "generic":
         return f"Generic ({settings.platform_api_base_url})"
     return f"CTFd ({settings.ctfd_url})"

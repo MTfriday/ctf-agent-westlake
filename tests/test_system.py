@@ -587,10 +587,10 @@ class TestUnifiedConfig:
         from backend.config import Settings
 
         s = Settings()
-        # These come from config.yaml (currently GZCTF mode)
-        assert s.platform_type == "gzctf"
-        assert s.platform_api_base_url == "http://150.158.131.227:65534"
-        assert s.platform_auth_type == "Bearer"
+        # These come from config.yaml (currently slab/WestLake mode)
+        assert s.platform_type == "slab"
+        assert s.platform_api_base_url == "https://slab.example.com"
+        assert s.slab_access_key_env == "SLAB_ACCESS_KEY"
         assert s.rate_limit_rps == 5
         assert s.sandbox_image == "ctf-sandbox"
 
@@ -1125,13 +1125,13 @@ class TestCoordinatorSelection:
         s.coordinator = "claude"
         assert _resolve_coordinator(s, "auto") == "claude"
 
-    def test_platform_label_gzctf(self) -> None:
-        """Test the platform label shows GZCTF for the active config."""
+    def test_platform_label_slab(self) -> None:
+        """Test the platform label shows slab/WestLake for the active config."""
         from backend.cli import _platform_label
         from backend.config import Settings
 
         s = Settings()
-        assert "GZCTF" in _platform_label(s)
+        assert "Slab" in _platform_label(s) or "西湖论剑" in _platform_label(s)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

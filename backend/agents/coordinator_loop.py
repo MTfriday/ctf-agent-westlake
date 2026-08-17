@@ -52,6 +52,12 @@ def _build_platform_client(settings: Settings) -> Any:
         logger.info("Using GZCTF platform client: %s", client.api_base_url)
         return PlatformAdapter(client)
 
+    if platform_type == "slab":
+        from backend.platforms.slab_client import SlabClient
+        client = SlabClient.from_settings(settings)
+        logger.info("Using slab (WestLake) platform client: %s", client.api_base_url)
+        return PlatformAdapter(client)
+
     # Default: CTFd
     logger.info("Using CTFd platform client: %s", settings.ctfd_url)
     return CTFdClient(

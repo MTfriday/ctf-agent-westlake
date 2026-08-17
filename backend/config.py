@@ -36,6 +36,9 @@ class YamlConfigSource(PydanticBaseSettingsSource):
             "api_base_url": "platform_api_base_url",
             "api_path": "platform_api_path",
             "endpoints": "platform_endpoints",
+            # 西湖论剑 slab：Agent AccessKey
+            "access_key": "slab_access_key",
+            "access_key_env": "slab_access_key_env",
         },
         "solver": {
             "max_concurrent_challenges": "max_concurrent_challenges",
@@ -136,12 +139,16 @@ class Settings(BaseSettings):
     ctfd_token: str = ""
 
     # 通用平台模式（config.yaml platform.*，secret 从 .env 提供）
-    platform_type: str = "generic"          # "ctfd" | "generic" | "ctf2" | "gzctf"
+    platform_type: str = "generic"          # "ctfd" | "generic" | "ctf2" | "gzctf" | "slab"
     platform_auth_type: str = "Bearer"      # "Bearer" | "ApiKey" | "Header"
     platform_auth_credential: str = ""      # SECRET — 从 .env PLATFORM_AUTH_CREDENTIAL 读取
     platform_api_base_url: str = ""
     platform_api_path: str = "/api/open/v1"
     platform_endpoints: dict[str, str] = {}  # 仅 generic 模式使用
+
+    # 西湖论剑 slab（SECRET，来自 .env SLAB_ACCESS_KEY；X-Agent-AccessKey header）
+    slab_access_key: str = ""
+    slab_access_key_env: str = "SLAB_ACCESS_KEY"
 
     # GZCTF 凭据（SECRET，来自 .env）
     gzctf_username: str = ""
