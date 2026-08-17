@@ -128,6 +128,22 @@ uv run ctf-solve --coordinator codex ...
 
 示例：`MODELS=gateway/deepseek-v4-flash,gateway-bailian/qwen3.7-flash,gateway-bailian/qwen3.7-plus,gateway-bailian/qwen3.8-max`
 
+### 查询百炼官方模型目录
+
+`backend/bailian_models.py` 调用百炼官方 `GET /api/v1/models` 拉取可用模型列表
+（含定价、上下文长度），认证用 `BAILIAN_API_KEY`，host 从 `BAILIAN_BASE_URL` 自动推导。
+列表查询不消耗推理 token，配额耗尽时仍可用。
+
+```bash
+# 所有文本生成模型
+python -m backend.bailian_models --capabilities TG
+# Qwen 推理模型（作者 + 模态筛选）
+python -m backend.bailian_models --providers qwen --capabilities TG Reasoning
+# 按模型 ID 精确查询
+python -m backend.bailian_models --model qwen3.7-plus
+# 支持 --features / --min-context / --service-site / --supports 等筛选
+```
+
 ## 沙箱工具链
 
 每个求解器运行在预装 CTF 工具的隔离 Docker 容器中：
