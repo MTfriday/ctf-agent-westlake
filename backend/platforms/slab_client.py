@@ -335,6 +335,27 @@ class SlabClient(PlatformClient):
             logger.warning("slab overview failed: %s", e)
             return {}
 
+    async def fetch_notices(self) -> list[dict[str, Any]]:
+        """公告列表。"""
+        try:
+            data = await self._request("GET", f"{_ENV_PATH}/match/notice/now-list")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("slab notice-list failed: %s", e)
+            return []
+        if isinstance(data, list):
+            return [dict(x) for x in data if isinstance(x, dict)]
+        return [dict(x) for x in (data.get("list", []) if isinstance(data, dict) else []) if isinstance(x, dict)]
+
+    async def fetch_notice_detail(self, notice_id: int | str) -> dict[str, Any]:
+        """公告详情。"""
+        try:
+            return dict(await self._request(
+                "GET", f"{_ENV_PATH}/match/notice/detail", params={"id": notice_id}
+            ) or {})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("slab notice-detail %s failed: %s", notice_id, e)
+            return {}
+
     # ── 诊断 / 关闭 ─────────────────────────────────────────────────────────
 
     def diagnostics(self) -> dict[str, Any]:
