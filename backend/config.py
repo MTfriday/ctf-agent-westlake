@@ -173,6 +173,10 @@ class Settings(BaseSettings):
     gateway_base_url: str = ""
     gateway_api_key: str = ""
 
+    # 平台 LLM 网关代理（西湖论剑 llm-gateway 代理的百炼，SECRET，来自 .env）
+    # 同上：base_url 是"完整 Chat Completions 端点"；认证复用 BAILIAN_API_KEY。
+    gateway_bailian_base_url: str = ""
+
     # Provider-specific (optional, for Bedrock/Azure/Zen fallback)
     aws_region: str = "us-east-1"
     aws_bearer_token: str = ""

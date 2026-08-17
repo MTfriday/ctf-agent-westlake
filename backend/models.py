@@ -55,6 +55,9 @@ FALLBACK_MODELS: list[str] = [
     "deepseek/deepseek-v4-pro",
     "gateway/deepseek-v4-flash",
     "gateway/deepseek-v4-pro",
+    "gateway-bailian/qwen3.8-max",
+    "gateway-bailian/qwen3.7-plus",
+    "gateway-bailian/qwen3.7-flash",
     "bailian/qwen3.7-flash",
     "bailian/qwen3.7-plus",
     "bailian/qwen3.8-max",
@@ -86,6 +89,7 @@ def _provider_ready(spec: str, settings: Settings) -> bool:
         "openai": settings.openai_api_key,
         "deepseek": settings.deepseek_api_key,
         "gateway": settings.gateway_api_key,
+        "gateway-bailian": settings.bailian_api_key,
         "bailian": settings.bailian_api_key,
         "azure": settings.azure_openai_api_key,
         "zen": settings.opencode_zen_api_key,
@@ -175,6 +179,23 @@ VISION_MODELS: set[str] = {
 }
 
 
+def _build_gateway_model(model_id: str, base_url: str, api_key: str) -> OpenAIChatModel:
+    """构建"平台 LLM 网关代理"模型。
+
+    网关代理给出的 base_url 本身就是完整 Chat Completions 端点，openai SDK 却会
+    在其后拼 `/chat/completions`（→ 404），因此必须用 `_TrimCompletionsTransport`
+    在转发前去掉该路径段。
+    """
+    return OpenAIChatModel(
+        model_id,
+        provider=OpenAIProvider(
+            base_url=base_url,
+            api_key=api_key,
+            http_client=httpx.AsyncClient(transport=_TrimCompletionsTransport()),
+        ),
+    )
+
+
 def resolve_model(spec: str, settings: Settings) -> Model:
     """Resolve a 'provider/model_id' spec to a Pydantic AI Model."""
     provider = provider_from_spec(spec)
@@ -225,15 +246,14 @@ def resolve_model(spec: str, settings: Settings) -> Model:
             # 平台 LLM 网关代理（西湖论剑 llm-gateway 代理的 DeepSeek）
             # base_url 是"完整 Chat Completions 端点"，openai SDK 会在其后拼
             # /chat/completions → 404，必须用 _TrimCompletionsTransport 去掉该路径段。
-            return OpenAIChatModel(
-                model_id,
-                provider=OpenAIProvider(
-                    base_url=settings.gateway_base_url,
-                    api_key=settings.gateway_api_key,
-                    http_client=httpx.AsyncClient(
-                        transport=_TrimCompletionsTransport()
-                    ),
-                ),
+            return _build_gateway_model(
+                model_id, settings.gateway_base_url, settings.gateway_api_key
+            )
+        case "gateway-bailian":
+            # 平台 LLM 网关代理（西湖论剑 llm-gateway 代理的百炼）
+            # 与 gateway 同理：完整端点 + trim transport；认证复用 BAILIAN_API_KEY。
+            return _build_gateway_model(
+                model_id, settings.gateway_bailian_base_url, settings.bailian_api_key
             )
         case "bailian":
             # 阿里百炼 — OpenAI 兼容接口
@@ -281,6 +301,13 @@ def resolve_model_settings(spec: str) -> ModelSettings:
             )
         case "gateway":
             # 平台网关代理的 DeepSeek 与直连 DeepSeek 行为一致：思考模式与
+            # tool_choice='required' 冲突，需用 reasoning_effort='none' 关闭思考。
+            return OpenAIChatModelSettings(
+                max_tokens=128_000,
+                openai_reasoning_effort="none",
+            )
+        case "gateway-bailian":
+            # 平台网关代理的百炼与直连百炼行为一致：qwen3.x 默认思考模式与
             # tool_choice='required' 冲突，需用 reasoning_effort='none' 关闭思考。
             return OpenAIChatModelSettings(
                 max_tokens=128_000,

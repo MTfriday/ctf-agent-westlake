@@ -120,11 +120,13 @@ uv run ctf-solve --coordinator codex ...
 | deepseek-v4-flash | DeepSeek | 快速，适合简单题      |
 | deepseek-v4-pro   | DeepSeek | 深度推理              |
 
-未指定时自动检测可用 provider；支持 `bailian/<model>`、`deepseek/<model>`、`gateway/<model>` 等前缀。
+未指定时自动检测可用 provider；支持 `bailian/<model>`、`deepseek/<model>`、`gateway/<model>`、`gateway-bailian/<model>` 等前缀。
 
-- `gateway/deepseek-v4-flash`：西湖论剑比赛平台 llm-gateway 代理的 DeepSeek（`GATEWAY_BASE_URL` + `GATEWAY_API_KEY`）。该 base_url 是**完整 Chat Completions 端点**，系统会自动去掉 openai SDK 拼接的 `/chat/completions` 后缀。
+- `gateway/deepseek-v4-flash`：西湖论剑比赛平台 llm-gateway 代理的 DeepSeek（`GATEWAY_BASE_URL` + `GATEWAY_API_KEY`）。
+- `gateway-bailian/qwen3.7-plus` 等：西湖论剑比赛平台 llm-gateway 代理的百炼（`GATEWAY_BAILIAN_BASE_URL`，认证复用 `BAILIAN_API_KEY`），可绕过 MaaS 直连配额。
+- 以上代理的 base_url 都是**完整 Chat Completions 端点**，系统会自动去掉 openai SDK 拼接的 `/chat/completions` 后缀。
 
-示例：`MODELS=gateway/deepseek-v4-flash,deepseek/deepseek-v4-flash,bailian/qwen-max`
+示例：`MODELS=gateway/deepseek-v4-flash,gateway-bailian/qwen3.7-flash,gateway-bailian/qwen3.7-plus,gateway-bailian/qwen3.8-max`
 
 ## 沙箱工具链
 
