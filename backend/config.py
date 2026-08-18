@@ -56,6 +56,7 @@ class YamlConfigSource(PydanticBaseSettingsSource):
             "pattern": "flag_pattern",
             "min_length": "flag_min_length",
             "max_submit": "flag_max_submit",
+            "guess_limit": "flag_guess_limit",
         },
         "rate_limit": {
             "enabled": "rate_limit_enabled",
@@ -215,6 +216,9 @@ class Settings(BaseSettings):
     flag_min_length: int = 1
     # 每题最大 flag 提交次数（平台规则：超过后无法提交；0=不限制）
     flag_max_submit: int = 50
+    # 每题内部提交预算（防盲猜乱交）：超过后硬性禁止继续提交，强制分析。
+    # 0=不启用内部预算（仅靠平台上限）。默认 10。
+    flag_guess_limit: int = 10
 
     # ========== 速率限制（config.yaml rate_limit.*）==========
     rate_limit_enabled: bool = True

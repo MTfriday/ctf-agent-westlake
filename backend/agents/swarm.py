@@ -227,6 +227,19 @@ class ChallengeSwarm:
                     False,
                 )
 
+            # 内部提交预算（防盲猜乱交）：超过后硬性禁止继续提交，强制分析。
+            # 模型反复猜测无意义 flag（如 DASCTF{607}、DASCTF{25f}）会耗尽平台
+            # 50 次上限，故内部再设一道更低的预算线。
+            guess_limit = getattr(self.settings, "flag_guess_limit", 0)
+            if guess_limit > 0 and self._total_submits >= guess_limit:
+                return (
+                    f"HARD STOP — 本题 flag 提交已达内部预算 {guess_limit} 次，"
+                    "禁止继续猜测提交（会耗尽平台上限）。请停止提交，继续深入分析；"
+                    "仅当你能从服务返回 / 附件内容直接提取到明确 flag 时，"
+                    "先在黑板上记录该候选与证据，再考虑是否提交。",
+                    False,
+                )
+
             # Escalating cooldown after incorrect submissions
             wrong_count = self._submit_count.get(model_spec, 0)
             cooldown_idx = min(wrong_count, len(self.SUBMISSION_COOLDOWNS) - 1)
