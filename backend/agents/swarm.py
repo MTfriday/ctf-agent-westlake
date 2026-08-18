@@ -192,6 +192,7 @@ class ChallengeSwarm:
                 board = [
                     f for f in facts
                     if f.get("type") in ("discovery", "deadend", "partial")
+                    and not str(f.get("content") or "").startswith("__SUBMITS__:")
                 ]
                 if board:
                     board_lines = [
@@ -202,6 +203,34 @@ class ChallengeSwarm:
             except Exception:  # noqa: BLE001
                 pass
         return "\n\n".join(parts) if parts else "No sibling insights available yet."
+
+    # 提交计数持久化：用黑板 partial 事实记录累计提交次数（约定前缀 __SUBMITS__:），
+    # 使预算跨 swarm 实例生效——auto-solve 恢复会新建 ChallengeSwarm（内存计数归零），
+    # 不持久化则每次恢复预算都被重置，模型可反复消耗平台提交次数。
+    def _read_submit_count(self) -> int:
+        if self.store is None:
+            return self._total_submits
+        try:
+            for f in self.store.list_facts(self.meta.name, type="partial", limit=200):
+                c = str(f.get("content") or "")
+                if c.startswith("__SUBMITS__:"):
+                    try:
+                        return int(c.split(":", 1)[1].strip())
+                    except ValueError:
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+        return self._total_submits
+
+    def _persist_submit_count(self, n: int) -> None:
+        if self.store is None:
+            return
+        try:
+            self.store.add_fact(
+                self.meta.name, f"__SUBMITS__:{n}", type="partial", source="swarm"
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # Escalating cooldowns after incorrect submissions (per model)
     SUBMISSION_COOLDOWNS = [0, 30, 120, 300, 600]  # 0s, 30s, 2min, 5min, 10min
@@ -218,6 +247,12 @@ class ChallengeSwarm:
             if normalized in self._submitted_flags:
                 return "INCORRECT — already tried this exact flag.", False
 
+            # 跨 swarm 实例累计：合并黑板上持久化的提交计数（auto-solve 恢复新建
+            # swarm 时内存计数归零，预算会被重置——用持久化计数顶上来）
+            persisted = self._read_submit_count()
+            if persisted > self._total_submits:
+                self._total_submits = persisted
+
             # 平台规则：每题 flag 最大提交次数（超过后平台拒绝提交）
             max_submit = getattr(self.settings, "flag_max_submit", 50)
             if max_submit > 0 and self._total_submits >= max_submit:
@@ -229,7 +264,7 @@ class ChallengeSwarm:
 
             # 内部提交预算（防盲猜乱交）：超过后硬性禁止继续提交，强制分析。
             # 模型反复猜测无意义 flag（如 DASCTF{607}、DASCTF{25f}）会耗尽平台
-            # 50 次上限，故内部再设一道更低的预算线。
+            # 50 次上限，故内部再设一道更低的预算线（持久化，跨 swarm 累计）。
             guess_limit = getattr(self.settings, "flag_guess_limit", 0)
             if guess_limit > 0 and self._total_submits >= guess_limit:
                 return (
@@ -258,6 +293,7 @@ class ChallengeSwarm:
 
             self._submitted_flags.add(normalized)
             self._total_submits += 1
+            self._persist_submit_count(self._total_submits)
 
             from backend.tools.core import do_submit_flag
             display, is_confirmed = await do_submit_flag(self.ctfd, self.meta.name, flag)
