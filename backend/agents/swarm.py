@@ -183,6 +183,24 @@ class ChallengeSwarm:
         for model, finding in self.findings.items():
             if model != exclude_model and finding:
                 parts.append(f"[{model}]: {finding}")
+        # 黑板历史发现（hybrid）：把该题已沉淀的 discovery/deadend/partial 也喂给
+        # 下一轮 bump，实现「没找到 → 记黑板 → 下一轮从黑板继续」的闭环，
+        # 避免 solver 重复已试过的方向。
+        if self.store is not None:
+            try:
+                facts = self.store.list_facts(self.meta.name, limit=60)
+                board = [
+                    f for f in facts
+                    if f.get("type") in ("discovery", "deadend", "partial")
+                ]
+                if board:
+                    board_lines = [
+                        f"- [{f.get('type')}] {str(f.get('content'))[:300]}"
+                        for f in board[-25:]
+                    ]
+                    parts.append("[黑板历史发现]:\n" + "\n".join(board_lines))
+            except Exception:  # noqa: BLE001
+                pass
         return "\n\n".join(parts) if parts else "No sibling insights available yet."
 
     # Escalating cooldowns after incorrect submissions (per model)
@@ -302,6 +320,12 @@ class ChallengeSwarm:
                         activity = solver.recent_activity()
                     except Exception:  # noqa: BLE001
                         activity = ""
+                    # recent_activity 为空（如一轮直接结束）时，用 findings 兜底，
+                    # 保证「没找到」的进展一定记到黑板，供下一轮/断点续跑使用。
+                    if not activity and result.findings_summary and not result.findings_summary.startswith(
+                        ("Error:", "Turn failed:")
+                    ):
+                        activity = result.findings_summary
                     if activity:
                         self.store.add_discovery(
                             self.meta.name,
