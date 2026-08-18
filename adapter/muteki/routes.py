@@ -307,8 +307,18 @@ _DEFAULT_DEEPSEEK = "https://api.deepseek.com"
 
 
 def _default_providers(runtime: SolverRuntime) -> list[dict[str, Any]]:
-    """从 settings/.env 构造默认 LLM 端点列表（百炼 + DeepSeek）。"""
+    """从 settings/.env 构造默认 LLM 端点列表（百炼 + DeepSeek）。
+
+    实际求解走西湖论剑 llm-gateway 代理的百炼（gateway-bailian），
+    故 base_url 优先显示代理端点（绕开 MaaS 直连配额）。
+    """
     st = runtime.settings
+    gw_bailian = getattr(st, "gateway_bailian_base_url", "") or ""
+    bailian_display = (
+        gw_bailian
+        or getattr(st, "bailian_base_url", "")
+        or _DEFAULT_BAILIAN
+    )
 
     def env_key(attr: str) -> bool:
         return bool(getattr(st, attr, "") or "")
@@ -316,8 +326,8 @@ def _default_providers(runtime: SolverRuntime) -> list[dict[str, Any]]:
     return [
         {
             "id": "bailian",
-            "label": "阿里百炼",
-            "base_url": getattr(st, "bailian_base_url", "") or _DEFAULT_BAILIAN,
+            "label": "阿里百炼" + ("（代理）" if gw_bailian else ""),
+            "base_url": bailian_display,
             "api_key_present": env_key("bailian_api_key"),
             "model_planner": getattr(st, "orchestrator_main_model", "") or "qwen3.7-max",
             "model_router": getattr(st, "orchestrator_router_model", "") or "qwen3.6-flash",
@@ -433,7 +443,8 @@ async def _btw_stream(
     except Exception:  # noqa: BLE001
         pass
     st = runtime.settings
-    base_url = getattr(st, "bailian_base_url", "") or _DEFAULT_BAILIAN
+    gw_bailian = getattr(st, "gateway_bailian_base_url", "") or ""
+    base_url = gw_bailian or getattr(st, "bailian_base_url", "") or _DEFAULT_BAILIAN
     api_key = getattr(st, "bailian_api_key", "") or ""
     model = getattr(st, "orchestrator_main_model", "") or "qwen3.7-max"
 
@@ -462,9 +473,11 @@ async def _btw_stream(
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
+        # gateway-bailian base_url 本身即完整端点（llm-gateway 代理），不再拼 /chat/completions
+        url = base_url if gw_bailian else f"{base_url}/chat/completions"
         async with httpx.AsyncClient(trust_env=False, timeout=120) as client:
             async with client.stream(
-                "POST", f"{base_url}/chat/completions", headers=headers, json=payload
+                "POST", url, headers=headers, json=payload
             ) as resp:
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
