@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -33,6 +34,24 @@ logger = logging.getLogger(__name__)
 
 # 单 run 环形历史容量（Last-Event-ID 续传窗口）
 _HISTORY_LEN = 600
+
+
+def _notice_fingerprint(notices: list[dict[str, Any]]) -> str:
+    """公告列表指纹：id + 标题/时间等关键字段，用于判断是否有更新。"""
+    items: list[dict[str, Any]] = []
+    for n in notices or []:
+        if not isinstance(n, dict):
+            continue
+        items.append({
+            "id": n.get("id") or n.get("noticeId") or n.get("notice_id"),
+            "title": n.get("title") or n.get("name") or n.get("subject") or "",
+            "time": n.get("createTime") or n.get("created_at") or n.get("publishTime")
+            or n.get("updateTime") or n.get("updated_at") or n.get("time") or "",
+            "content": (n.get("content") or n.get("summary") or "")[:200],
+        })
+    items.sort(key=lambda x: str(x.get("id") or ""))
+    raw = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -128,6 +147,9 @@ class RunManager:
         self._auto_task: Optional[asyncio.Task] = None
         # 用户删除的 run_id（防止全自动 seed 把平台上的题重新注册/重新求解）
         self._deleted: set[str] = set()
+        # 公告轮询：上次公告指纹；变化时才拉赛题（省流量/避免阶段未开始刷 40001）
+        self._notice_fp: str = ""
+        self._last_notices: list[dict[str, Any]] = []
         self._load_meta()
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
@@ -136,13 +158,14 @@ class RunManager:
         if self._sync_task is not None:
             return
         self._sync_task = asyncio.create_task(self._sync_loop(), name="muteki-sync")
-        await self._seed_challenges()
+        # 启动时先尝试拉一次赛题（阶段未开始会失败，后续靠公告轮询触发）
+        await self._seed_challenges(force=True)
         # 全自动求解：启动后自动对未解出题目发起求解（蓝皮书 P1 轮询器语义）
         if getattr(self.runtime.settings, "adapter_auto_solve", True):
             self._auto_task = asyncio.create_task(
                 self._auto_solve_loop(), name="muteki-auto-solve"
             )
-            logger.info("auto-solve enabled — scanning unsolved challenges")
+            logger.info("auto-solve enabled — notice poll + unsolved challenge scan")
 
     async def stop(self) -> None:
         if self._auto_task is not None:
@@ -163,85 +186,137 @@ class RunManager:
 
     # ── 全自动求解循环 ──────────────────────────────────────────────────
     async def _auto_solve_loop(self) -> None:
-        """周期扫描：自动发起对未解出 run 的求解；检测平台新题/已解出。
+        """周期扫描：公告轮询 ->（有更新则）拉赛题 -> 自动求解未解出题。
+
+        默认每 5s 拉一次公告；公告指纹变化时才拉赛题（省流量，也避免
+        阶段未开始时反复刷 exercise-list 40001）。公告接口不可用时回退为
+        周期性直接拉题。
 
         已解出的题目跳过（不浪费 token）；已 running/solved 的跳过。
         中断的 run（failed/stopped 且黑板有上下文）会自动从黑板续跑。
         串行逐个启动，避免同时拉爆资源；一轮内全部启动后等待下个周期。
         """
-        interval = float(getattr(self.runtime.settings, "adapter_auto_poll_interval", 20.0) or 20.0)
+        interval = float(getattr(self.runtime.settings, "adapter_auto_poll_interval", 5.0) or 5.0)
+        notice_poll = bool(getattr(self.runtime.settings, "adapter_notice_poll", True))
         try:
             while True:
                 try:
-                    # 定期重拉平台题目：发现新题自动预注册 + 检测已解出
-                    await self._seed_challenges()
-                    for entry in sorted(self._runs.values(), key=lambda r: r.order):
-                        if entry.solved:
-                            continue
-                        # adapter 重启后：引擎已丢失的"running" run → 视为中断，从黑板续跑
-                        if entry.started and not entry.finished:
-                            alive = False
-                            if entry.engine_run_id and self.runtime.engine is not None:
-                                alive = entry.engine_run_id in (self.runtime.engine.runs or {})
-                            if not alive:
-                                logger.info(
-                                    "auto-solve: restarting interrupted %r (engine lost)",
-                                    entry.run_id,
-                                )
-                                try:
-                                    await self.start(
-                                        entry.run_id,
-                                        {"kind": "swarm", "prompt": entry.prompt,
-                                         "challenge": {"name": entry.run_id,
-                                                       "category": entry.category}},
-                                    )
-                                except RuntimeError as e:
-                                    logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning("auto-resume %s failed: %s", entry.run_id, e)
-                            continue
-                        # 断点续传：上次失败/停止 且 黑板留有上下文 → 自动续跑
-                        if entry.started and entry.finished and entry.status in ("failed", "stopped"):
-                            has_ctx = self._has_blackboard_ctx(entry.run_id)
-                            if has_ctx:
-                                logger.info(
-                                    "auto-solve: resuming %r from blackboard", entry.run_id
-                                )
-                                try:
-                                    await self.start(
-                                        entry.run_id,
-                                        {"kind": "swarm", "prompt": entry.prompt,
-                                         "challenge": {"name": entry.run_id,
-                                                       "category": entry.category}},
-                                    )
-                                except RuntimeError as e:
-                                    logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning("auto-resume %s failed: %s", entry.run_id, e)
-                            continue
-                        if entry.started:
-                            continue
-                        # 已解出但运行中结束、或从未启动 → 自动启动求解
-                        logger.info("auto-solve: starting %r (unsolved)", entry.run_id)
-                        try:
-                            await self.start(
-                                entry.run_id,
-                                {"kind": "swarm", "prompt": entry.prompt,
-                                 "challenge": {"name": entry.run_id,
-                                               "category": entry.category}},
-                            )
-                        except RuntimeError as e:
-                            # 已解出等拒绝原因——标记并继续
-                            logger.warning("auto-solve %s skipped: %s", entry.run_id, e)
-                            entry.solved = True
-                            entry.status = "solved"
-                        except Exception as e:  # noqa: BLE001
-                            logger.warning("auto-solve %s failed: %s", entry.run_id, e)
+                    # 1) 公告驱动 / 直接拉题
+                    #    - 公告有更新 → 拉赛题
+                    #    - 尚无任何赛题（阶段未开始/首次）→ 每轮都试拉，避免只靠公告漏题
+                    #    - notice_poll=false → 每轮直接拉题
+                    if notice_poll:
+                        changed = await self._poll_notices()
+                        no_challenges_yet = not any(
+                            r.run_id not in self._deleted for r in self._runs.values()
+                        )
+                        if changed or no_challenges_yet or not self._seeded:
+                            await self._seed_challenges(force=True)
+                    else:
+                        await self._seed_challenges(force=True)
+
+                    # 2) 自动求解未解出题
+                    await self._auto_start_unsolved()
                 except Exception as e:  # noqa: BLE001
                     logger.warning("auto-solve cycle error: %s", e)
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             logger.info("auto-solve loop stopped")
+
+    async def _poll_notices(self) -> bool:
+        """拉公告并与上次指纹比对。返回 True 表示公告有更新（或首次成功）。
+
+        平台无公告接口 / 拉取失败时返回 False（调用方按策略决定是否仍拉题）。
+        """
+        platform = self.runtime.platform
+        if not hasattr(platform, "fetch_notices"):
+            return False
+        try:
+            notices = await platform.fetch_notices()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("notice poll failed: %s", e)
+            return False
+        if not isinstance(notices, list):
+            notices = []
+        fp = _notice_fingerprint(notices)
+        if fp == self._notice_fp:
+            return False
+        prev = self._notice_fp
+        self._notice_fp = fp
+        self._last_notices = notices
+        if prev:
+            logger.info(
+                "notices updated: %d item(s) — will refresh challenges",
+                len(notices),
+            )
+        else:
+            logger.info("notices baseline set: %d item(s)", len(notices))
+        return True
+
+    async def _auto_start_unsolved(self) -> None:
+        """对未解出 / 中断的 run 自动发起求解。"""
+        for entry in sorted(self._runs.values(), key=lambda r: r.order):
+            if entry.solved:
+                continue
+            # adapter 重启后：引擎已丢失的"running" run → 视为中断，从黑板续跑
+            if entry.started and not entry.finished:
+                alive = False
+                if entry.engine_run_id and self.runtime.engine is not None:
+                    alive = entry.engine_run_id in (self.runtime.engine.runs or {})
+                if not alive:
+                    logger.info(
+                        "auto-solve: restarting interrupted %r (engine lost)",
+                        entry.run_id,
+                    )
+                    try:
+                        await self.start(
+                            entry.run_id,
+                            {"kind": "swarm", "prompt": entry.prompt,
+                             "challenge": {"name": entry.run_id,
+                                           "category": entry.category}},
+                        )
+                    except RuntimeError as e:
+                        logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("auto-resume %s failed: %s", entry.run_id, e)
+                continue
+            # 断点续传：上次失败/停止 且 黑板留有上下文 → 自动续跑
+            if entry.started and entry.finished and entry.status in ("failed", "stopped"):
+                has_ctx = self._has_blackboard_ctx(entry.run_id)
+                if has_ctx:
+                    logger.info(
+                        "auto-solve: resuming %r from blackboard", entry.run_id
+                    )
+                    try:
+                        await self.start(
+                            entry.run_id,
+                            {"kind": "swarm", "prompt": entry.prompt,
+                             "challenge": {"name": entry.run_id,
+                                           "category": entry.category}},
+                        )
+                    except RuntimeError as e:
+                        logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("auto-resume %s failed: %s", entry.run_id, e)
+                continue
+            if entry.started:
+                continue
+            # 从未启动 → 自动启动求解
+            logger.info("auto-solve: starting %r (unsolved)", entry.run_id)
+            try:
+                await self.start(
+                    entry.run_id,
+                    {"kind": "swarm", "prompt": entry.prompt,
+                     "challenge": {"name": entry.run_id,
+                                   "category": entry.category}},
+                )
+            except RuntimeError as e:
+                # 已解出等拒绝原因——标记并继续
+                logger.warning("auto-solve %s skipped: %s", entry.run_id, e)
+                entry.solved = True
+                entry.status = "solved"
+            except Exception as e:  # noqa: BLE001
+                logger.warning("auto-solve %s failed: %s", entry.run_id, e)
 
     def _has_blackboard_ctx(self, run_id: str) -> bool:
         """黑板是否留有该 run 的实质上下文（发现/死路/部分结果/活跃计划）。"""
@@ -252,15 +327,23 @@ class RunManager:
             return False
 
     # ── challenge 预注册 ─────────────────────────────────────────────────
-    async def _seed_challenges(self) -> None:
-        if self._seeded:
+    async def _seed_challenges(self, *, force: bool = False) -> None:
+        """从平台拉赛题并预注册为 runs。
+
+        force=False 且已 seed 过时直接返回（兼容旧调用）。
+        force=True 时每次都重拉：发现新题、更新已解出状态。
+        """
+        if self._seeded and not force:
             return
-        self._seeded = True
         try:
             challenges = await self.runtime.platform.fetch_all_challenges()
         except Exception as e:  # noqa: BLE001
             logger.warning("seed challenges failed: %s", e)
             return
+        # 成功拉到列表（哪怕为空）才标记 seeded；阶段未开始失败不标记，便于后续重试
+        self._seeded = True
+        before = len(self._runs)
+        new_count = 0
         for ch in challenges:
             name = str(ch.get("name") or "").strip()
             if not name:
@@ -297,6 +380,7 @@ class RunManager:
                 if value is not None:
                     entry.value = int(value)
                 self._runs[name] = entry
+                new_count += 1
             # 预注册 run 写入初始 RUN_STARTED 事件（携带题面描述），
             # 这样前端打开草稿时能渲染出题目开场气泡，而不是空白对话区。
             # history 为空（首次 seed 或重启后）时补上；已有事件则保留。
@@ -314,8 +398,11 @@ class RunManager:
                     },
                 }))
         self._save_meta()
-        logger.info("seeded %d challenge runs (%d already solved)",
-                    len(self._runs), sum(1 for r in self._runs.values() if r.solved))
+        logger.info(
+            "seeded challenges: total=%d (+%d new, was %d) already_solved=%d",
+            len(self._runs), new_count, before,
+            sum(1 for r in self._runs.values() if r.solved),
+        )
 
     # ── runs 列表 / 查询 ─────────────────────────────────────────────────
     def list_runs(self, include_archived: bool = False) -> list[dict[str, Any]]:

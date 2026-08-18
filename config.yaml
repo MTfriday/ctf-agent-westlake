@@ -107,8 +107,10 @@ adapter:
   engine_backend: "hybrid"
   # 全自动求解: true=启动后自动扫描未解出题目并发起求解（跳过已解出，避免浪费 token）
   auto_solve: true
-  # 自动求解轮询间隔（秒）——定期检测平台新题 / 解出状态
-  auto_poll_interval: 20
+  # 自动轮询间隔（秒）——每 N 秒拉一次公告；公告有更新再拉赛题
+  auto_poll_interval: 5
+  # 公告驱动拉题：true=每轮先拉公告，有变化才拉赛题；false=每轮直接拉赛题
+  notice_poll: true
 
 # ========== Aemeath 总控（OODA 循环 + 模式路由）==========
 orchestrator:

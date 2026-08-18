@@ -80,6 +80,17 @@ class PlatformAdapter:
             })
         return result
 
+    async def fetch_notices(self) -> list[dict[str, Any]]:
+        """公告列表（平台支持时透传；否则返回空列表）。"""
+        client = self._client
+        if hasattr(client, "fetch_notices"):
+            try:
+                return list(await client.fetch_notices() or [])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("fetch_notices failed: %s", e)
+                return []
+        return []
+
     async def fetch_solved_names(self) -> set[str]:
         """Set of solved challenge names."""
         try:

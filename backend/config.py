@@ -85,6 +85,9 @@ class YamlConfigSource(PydanticBaseSettingsSource):
             "host": "adapter_host",
             "port": "adapter_port",
             "engine_backend": "adapter_engine_backend",
+            "auto_solve": "adapter_auto_solve",
+            "auto_poll_interval": "adapter_auto_poll_interval",
+            "notice_poll": "adapter_notice_poll",
         },
         "orchestrator": {
             "enabled": "orchestrator_enabled",
@@ -245,8 +248,10 @@ class Settings(BaseSettings):
     adapter_engine_backend: str = "swarm"  # "swarm" | "mock"
     # 全自动求解：启动后自动扫描未解出题目并发起求解（跳过已解出，避免浪费 token）
     adapter_auto_solve: bool = True
-    # 自动求解轮询间隔（秒）——定期检测平台新题/解出状态
-    adapter_auto_poll_interval: float = 20.0
+    # 自动轮询间隔（秒）——默认每 5s 拉一次公告；公告有更新再拉赛题
+    adapter_auto_poll_interval: float = 5.0
+    # 是否启用「公告驱动拉题」（true=每轮先拉公告，有变化才拉赛题；false=每轮直接拉赛题）
+    adapter_notice_poll: bool = True
 
     # ========== Aemeath 总控（config.yaml orchestrator.*）==========
     orchestrator_enabled: bool = True
