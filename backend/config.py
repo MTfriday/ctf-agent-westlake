@@ -250,7 +250,7 @@ class Settings(BaseSettings):
 
     # ========== Aemeath 总控（config.yaml orchestrator.*）==========
     orchestrator_enabled: bool = True
-    orchestrator_main_model: str = "qwen3.8-max"
+    orchestrator_main_model: str = "qwen3.7-plus"
     orchestrator_router_model: str = "qwen3.7-flash"
     orchestrator_max_intents: int = 4
     orchestrator_intent_timeout_seconds: int = 120

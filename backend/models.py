@@ -48,19 +48,17 @@ DEFAULT_MODELS: list[str] = [
 ]
 
 # Fallback models for environments without claude/codex CLIs — uses OpenAI-compatible APIs
-# DeepSeek 新版模型：v4-flash（默认，便宜）/ v4-pro（更强但贵，仅复杂题用）
-# 百炼现行推荐：qwen3.8-max（最强）/ qwen3.7-plus（均衡）/ qwen3.7-flash（最快最省）
+# 性价比默认：千问 qwen3.7-plus + 智谱 glm-4.6 + DeepSeek v4-flash
 FALLBACK_MODELS: list[str] = [
-    "deepseek/deepseek-v4-flash",
-    "deepseek/deepseek-v4-pro",
-    "gateway/deepseek-v4-flash",
-    "gateway/deepseek-v4-pro",
-    "gateway-bailian/qwen3.8-max",
     "gateway-bailian/qwen3.7-plus",
+    "gateway-bailian/glm-4.6",
+    "gateway/deepseek-v4-flash",
     "gateway-bailian/qwen3.7-flash",
-    "bailian/qwen3.7-flash",
+    "gateway-bailian/glm-4.7",
+    "gateway/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
     "bailian/qwen3.7-plus",
-    "bailian/qwen3.8-max",
+    "bailian/qwen3.7-flash",
     "openai/gpt-4o",
     "openai/gpt-4o-mini",
 ]
@@ -161,12 +159,17 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5.3-codex-spark": 128_000,
     "gemini-3-flash-preview": 1_000_000,
     # DeepSeek 新版模型
-    "deepseek-v4-flash": 128_000,
-    "deepseek-v4-pro": 128_000,
+    "deepseek-v4-flash": 1_000_000,
+    "deepseek-v4-pro": 1_000_000,
     # 阿里百炼通义千问（现行推荐）
     "qwen3.8-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
     "qwen3.7-flash": 1_000_000,
+    # 智谱 GLM（百炼/gateway-bailian）
+    "glm-4.6": 202_752,
+    "glm-4.7": 202_752,
+    "glm-4.5-air": 131_072,
+    "glm-5": 202_752,
 }
 
 # Models that support vision

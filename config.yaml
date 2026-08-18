@@ -53,10 +53,9 @@ solver:
   model_temperature: 0.7                     # 模型温度
   retry_delay_seconds: 30                    # 重试间隔
   # 模型选择（逗号分隔，留空=自动检测可用provider）
-  # 没有 claude/codex CLI 时会自动回退到 OpenAI 兼容 API
-  # 偏好：尽可能用百炼 → gateway-bailian 全部置前（qwen3.8-max 强推理 / qwen3.7-plus 均衡 / qwen3.7-flash 快速），
-  # gateway/deepseek-v4-flash 仅作兜底（删掉即纯百炼）
-  models: "gateway-bailian/qwen3.8-max,gateway-bailian/qwen3.7-plus,gateway-bailian/qwen3.7-flash,gateway/deepseek-v4-flash"
+  # 性价比组合：千问 + GLM + DeepSeek（均走比赛平台代理）
+  # qwen3.7-plus 均衡 / glm-4.6 智谱性价比 / deepseek-v4-flash 便宜快
+  models: "gateway-bailian/qwen3.7-plus,gateway-bailian/glm-4.6,gateway/deepseek-v4-flash"
 
   # Coordinator 后端: "claude" | "codex" | "pydantic" | "auto"
   # pydantic 可用任意 OpenAI 兼容模型（DeepSeek/百炼），无需 claude/codex CLI
@@ -114,9 +113,10 @@ adapter:
 # ========== Aemeath 总控（OODA 循环 + 模式路由）==========
 orchestrator:
   enabled: true
-  # 主力规划模型（百炼 qwen；未配 BAILIAN_API_KEY 时自动回退规则）
-  main_model: "qwen3.8-max"
-  # 模式路由模型
+  # 主力规划模型（走 gateway-bailian；未配 BAILIAN_API_KEY 时自动回退规则）
+  # 性价比：qwen3.7-plus（比 qwen3.8-max 便宜很多，规划够用）
+  main_model: "qwen3.7-plus"
+  # 模式路由模型（轻量快）
   router_model: "qwen3.7-flash"
   max_intents: 4                  # 每轮最多生成 Intent 数
   intent_timeout_seconds: 120     # Intent 执行超时（秒）
