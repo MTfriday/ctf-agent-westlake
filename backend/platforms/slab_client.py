@@ -249,37 +249,86 @@ class SlabClient(PlatformClient):
     # ── 附件下载 ───────────────────────────────────────────────────────────
 
     async def download_attachment(self, challenge_id: str | int, filename: str) -> bytes | None:
-        """按附件 URL 下载（带 AccessKey header）。
+        """下载题目附件。
 
-        PlatformAdapter 调用时传 filename；这里需要 URL，因此先从 detail 的
-        files 里按 name 找到 url 再下载。若直接传 url 也兼容。
+        ``filename`` 可为：
+        - 附件显示名（从详情 files 反查 url/key/signature）
+        - 直接的 http(s) URL
+        - JSON 对象字符串 / 已解析 dict（含 url/name/key/signature）
+
+        注意：资源站是绝对 URL（pro-resource），不能走带 base_url 的 client，
+        否则路径拼接/鉴权行为不可控。下载结果会校验，拒绝 HTML 错误页。
         """
         cid = str(challenge_id)
-        url = filename if filename.startswith(("http://", "https://")) else None
-        if url is None:
+        meta = _attachment_meta(filename)
+        if meta.get("url") is None and meta.get("name"):
             try:
                 detail = await self.get_challenge_detail(cid)
-                url = next(
-                    (f.get("url") for f in detail.files if f.get("name") == filename),
-                    None,
-                )
+                hit = _match_file(detail.files, meta.get("name") or "")
+                if hit:
+                    meta = {**hit, **{k: v for k, v in meta.items() if v}}
             except Exception:  # noqa: BLE001
-                url = None
-        if not url:
+                pass
+        if not meta.get("url") and not meta.get("key"):
+            # 最后兜底：详情里只有一个附件时直接用它
+            try:
+                detail = await self.get_challenge_detail(cid)
+                if len(detail.files) == 1:
+                    meta = {**detail.files[0], **{k: v for k, v in meta.items() if v}}
+            except Exception:  # noqa: BLE001
+                pass
+
+        candidates = _download_candidates(meta)
+        if not candidates:
             logger.warning("slab no attachment url for %s/%s", cid, filename)
             return None
 
+        headers = {"User-Agent": USER_AGENT}
+        if self.access_key:
+            headers["X-Agent-AccessKey"] = self.access_key
+            headers["key"] = str(meta.get("key") or "")
+            headers["signature"] = str(meta.get("signature") or "")
+
+        last_err = ""
         async with self.rate_limiter:
-            client = await self._ensure_client()
-            try:
-                resp = await client.get(url)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("slab download %s failed: %s", filename, e)
-                return None
-        if resp.status_code != 200:
-            logger.warning("slab download %s -> HTTP %d", filename, resp.status_code)
-            return None
-        return resp.content
+            async with httpx.AsyncClient(
+                headers={k: v for k, v in headers.items() if v},
+                timeout=60.0,
+                verify=False,
+                follow_redirects=True,
+                trust_env=False,
+            ) as client:
+                for url in candidates:
+                    try:
+                        resp = await client.get(url)
+                    except Exception as e:  # noqa: BLE001
+                        last_err = f"{url}: {e}"
+                        logger.warning("slab download %s failed: %s", filename, e)
+                        continue
+                    if resp.status_code != 200:
+                        last_err = f"{url}: HTTP {resp.status_code}"
+                        logger.warning(
+                            "slab download %s -> HTTP %d (%s)",
+                            filename,
+                            resp.status_code,
+                            url[:120],
+                        )
+                        continue
+                    data = resp.content or b""
+                    if not _looks_like_attachment(data, resp.headers.get("content-type", "")):
+                        last_err = f"{url}: rejected non-attachment body ({len(data)}B)"
+                        logger.warning(
+                            "slab download %s rejected error body from %s (%d bytes, ct=%s)",
+                            filename,
+                            url[:120],
+                            len(data),
+                            resp.headers.get("content-type"),
+                        )
+                        continue
+                    return data
+
+        logger.warning("slab download %s exhausted candidates; last=%s", filename, last_err)
+        return None
 
     # ── Flag 提交 ───────────────────────────────────────────────────────────
 
@@ -388,20 +437,158 @@ class _SlabEnv:
         self.raw = raw or {}
 
 
-def _files_of(attachment: Any) -> list[dict[str, str]]:
-    """attachment → [{name, url, ext}]。"""
-    if not isinstance(attachment, dict):
-        return []
-    files = attachment.get("files") or []
-    out: list[dict[str, str]] = []
-    for f in files if isinstance(files, list) else []:
-        if isinstance(f, dict) and f.get("url"):
-            out.append({
-                "name": str(f.get("name") or "attachment"),
-                "url": str(f.get("url")),
-                "ext": str(f.get("ext") or ""),
-            })
+def _file_entry(item: dict[str, Any]) -> dict[str, str] | None:
+    """规范化单个附件对象。"""
+    url = str(item.get("url") or item.get("previewUrl") or item.get("preview_url") or "").strip()
+    key = str(item.get("key") or "").strip()
+    if not url and not key:
+        return None
+    name = str(item.get("name") or item.get("filename") or "").strip()
+    if not name:
+        if url:
+            name = url.rstrip("/").rsplit("/", 1)[-1] or "attachment"
+        else:
+            name = f"attachment-{key[:8] or 'bin'}"
+    ext = str(
+        item.get("ext")
+        or item.get("extension")
+        or (name.rsplit(".", 1)[-1] if "." in name else "")
+    ).strip()
+    out = {
+        "name": name,
+        "url": url,
+        "ext": ext,
+    }
+    if key:
+        out["key"] = key
+    sig = str(item.get("signature") or item.get("sign") or "").strip()
+    if sig:
+        out["signature"] = sig
     return out
+
+
+def _files_of(attachment: Any) -> list[dict[str, str]]:
+    """attachment → [{name, url, ext, key?, signature?}]。
+
+    西湖论剑实际返回 **单个对象**：
+      {key, signature, url, name, previewUrl, extension}
+    也兼容：
+      - list[dict]
+      - {files: list[dict]}
+      - 空 / null
+    """
+    if attachment is None or attachment == "" or attachment == []:
+        return []
+
+    items: list[Any]
+    if isinstance(attachment, list):
+        items = attachment
+    elif isinstance(attachment, dict):
+        nested = attachment.get("files")
+        if isinstance(nested, list):
+            items = nested
+        elif attachment.get("url") or attachment.get("previewUrl") or attachment.get("key"):
+            items = [attachment]
+        else:
+            items = []
+    else:
+        return []
+
+    out: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        entry = _file_entry(item)
+        if entry:
+            out.append(entry)
+    return out
+
+
+def _attachment_meta(filename: Any) -> dict[str, str]:
+    """把 download_attachment 的 filename 参数归一成 meta dict。"""
+    if isinstance(filename, dict):
+        entry = _file_entry(filename) or {}
+        return entry
+    if not isinstance(filename, str):
+        return {"name": str(filename or "")}
+    text = filename.strip()
+    if not text:
+        return {}
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            import json
+
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return _file_entry(obj) or {}
+        except Exception:  # noqa: BLE001
+            pass
+    if text.startswith(("http://", "https://")):
+        return {"url": text, "name": text.rstrip("/").rsplit("/", 1)[-1] or "attachment"}
+    return {"name": text}
+
+
+def _match_file(files: list[dict[str, str]], name: str) -> dict[str, str] | None:
+    if not name:
+        return None
+    for f in files:
+        if f.get("name") == name:
+            return f
+    # 宽松：后缀/包含匹配
+    for f in files:
+        fn = f.get("name") or ""
+        if fn.endswith(name) or name.endswith(fn):
+            return f
+    return None
+
+
+def _download_candidates(meta: dict[str, str]) -> list[str]:
+    """生成附件下载候选 URL（去重保序）。"""
+    url = (meta.get("url") or "").strip()
+    key = (meta.get("key") or "").strip()
+    sig = (meta.get("signature") or "").strip()
+    preview = (meta.get("previewUrl") or meta.get("preview_url") or "").strip()
+    out: list[str] = []
+
+    def add(u: str) -> None:
+        u = (u or "").strip()
+        if u and u not in out:
+            out.append(u)
+
+    add(url)
+    add(preview)
+    if url and key and sig:
+        sep = "&" if "?" in url else "?"
+        add(f"{url}{sep}key={key}&signature={sig}")
+        add(f"{url}{sep}signature={sig}")
+        add(f"{url}{sep}key={key}&sign={sig}")
+    if key and sig:
+        add(f"https://pro-resource.dasctf.com/resource/oss/{key}?signature={sig}")
+        add(f"https://pro-resource.dasctf.com/resource/download?key={key}&signature={sig}")
+        add(f"https://pro-resource.dasctf.com/resource/download?key={key}&sign={sig}")
+    return out
+
+
+def _looks_like_attachment(data: bytes, content_type: str = "") -> bool:
+    """拒绝明显的 HTML/JSON 错误页，避免把 404 页存成 .zip。"""
+    if not data or len(data) < 4:
+        return False
+    head = data[:256].lstrip().lower()
+    ct = (content_type or "").lower()
+    if "text/html" in ct or head.startswith((b"<!doctype", b"<html", b"<head", b"<pre")):
+        return False
+    if head.startswith((b"cannot get", b"cannot post", b"not found", b"error")):
+        return False
+    # JSON error envelope
+    if head[:1] == b"{" and (
+        b"\"error\"" in head or b"\"status\"" in head or b"\"timestamp\"" in head
+    ):
+        # 允许极少数真正的 json 附件；错误页通常很短
+        if len(data) < 4096 and (
+            b"not found" in head or b"error" in head or b"message" in head
+        ):
+            return False
+    return True
 
 
 def _connection_of(endpoints: Any) -> str:

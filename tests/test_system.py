@@ -1154,6 +1154,208 @@ class TestCoordinatorSelection:
         assert "Slab" in _platform_label(s) or "西湖论剑" in _platform_label(s)
 
 
+# ── Slab attachment parsing / download guards ────────────────────────────────
+
+
+class TestSlabAttachmentHelpers:
+    """西湖论剑附件是单对象 {url,name,key,signature}，不是 files[]。"""
+
+    def test_files_of_single_object(self) -> None:
+        from backend.platforms.slab_client import _files_of
+
+        att = {
+            "key": "91e2229000c94f5cbd2eb5df0b576366",
+            "signature": "a63893345319c5f0bbf55c0edc25338a",
+            "url": "https://pro-resource.dasctf.com/resource/oss/165305e9.zip",
+            "name": "解压缩的附件.zip",
+            "previewUrl": "https://pro-resource.dasctf.com/resource/oss/165305e9.zip",
+            "extension": "zip",
+        }
+        files = _files_of(att)
+        assert len(files) == 1
+        assert files[0]["name"] == "解压缩的附件.zip"
+        assert files[0]["url"].endswith("165305e9.zip")
+        assert files[0]["key"] == "91e2229000c94f5cbd2eb5df0b576366"
+        assert files[0]["signature"] == "a63893345319c5f0bbf55c0edc25338a"
+        assert files[0]["ext"] == "zip"
+
+    def test_files_of_empty_and_list(self) -> None:
+        from backend.platforms.slab_client import _files_of
+
+        assert _files_of(None) == []
+        assert _files_of([]) == []
+        assert _files_of({"files": []}) == []
+        files = _files_of({
+            "files": [
+                {"name": "a.bin", "url": "https://x/a.bin"},
+                {"name": "skip-me"},  # no url/key
+            ]
+        })
+        assert len(files) == 1
+        assert files[0]["name"] == "a.bin"
+
+    def test_looks_like_attachment_rejects_html_error(self) -> None:
+        from backend.platforms.slab_client import _looks_like_attachment
+
+        html = b"<!DOCTYPE html>\n<html><body><pre>Cannot GET /resource/oss/x.zip</pre></body></html>"
+        assert _looks_like_attachment(html, "text/html") is False
+        assert _looks_like_attachment(b"PK\x03\x04" + b"\x00" * 20, "application/zip") is True
+        assert _looks_like_attachment(
+            b'{"timestamp":"x","status":404,"error":"Not Found"}',
+            "application/json",
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_get_challenge_detail_parses_single_attachment(self) -> None:
+        from backend.platforms.slab_client import SlabClient
+
+        client = SlabClient(api_base_url="https://pro.dasctf.com", access_key="ak_test")
+
+        async def mock_request(method: str, path: str, **kwargs: object) -> object:
+            return {
+                "id": 10663,
+                "name": "解压缩",
+                "description": "解压获取福来阁",
+                "score": "50.0",
+                "difficulty": "VERY_EASY",
+                "hasSolved": False,
+                "attachment": {
+                    "key": "k1",
+                    "signature": "s1",
+                    "url": "https://pro-resource.dasctf.com/resource/oss/abc.zip",
+                    "name": "解压缩的附件.zip",
+                    "extension": "zip",
+                },
+                "endpoints": [],
+            }
+
+        client._request = mock_request  # type: ignore[method-assign]
+        info = await client.get_challenge_detail(10663)
+        assert info.name == "解压缩"
+        assert info.value == 50
+        assert info.description.startswith("解压")
+        assert len(info.files) == 1
+        assert info.files[0]["name"] == "解压缩的附件.zip"
+        assert info.files[0]["key"] == "k1"
+
+    @pytest.mark.asyncio
+    async def test_download_attachment_rejects_html_404(self) -> None:
+        """HTML 404 不能当 zip 落盘。"""
+        from backend.platforms.slab_client import SlabClient
+
+        client = SlabClient(api_base_url="https://pro.dasctf.com", access_key="ak_test")
+        html = b"<!DOCTYPE html><html><body><pre>Cannot GET /x.zip</pre></body></html>"
+
+        class FakeResp:
+            status_code = 200
+            content = html
+            headers = {"content-type": "text/html; charset=utf-8"}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url, **kwargs):
+                return FakeResp()
+
+        with patch("backend.platforms.slab_client.httpx.AsyncClient", return_value=FakeClient()):
+            data = await client.download_attachment(
+                "10663",
+                {
+                    "name": "解压缩的附件.zip",
+                    "url": "https://pro-resource.dasctf.com/resource/oss/abc.zip",
+                    "key": "k1",
+                    "signature": "s1",
+                },
+            )
+        assert data is None
+
+    @pytest.mark.asyncio
+    async def test_download_attachment_accepts_zip_bytes(self) -> None:
+        from backend.platforms.slab_client import SlabClient
+
+        client = SlabClient(api_base_url="https://pro.dasctf.com", access_key="ak_test")
+        zip_bytes = b"PK\x03\x04" + b"\x00" * 64
+
+        class FakeResp:
+            status_code = 200
+            content = zip_bytes
+            headers = {"content-type": "application/zip"}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url, **kwargs):
+                return FakeResp()
+
+        with patch("backend.platforms.slab_client.httpx.AsyncClient", return_value=FakeClient()):
+            data = await client.download_attachment(
+                "10663",
+                {
+                    "name": "a.zip",
+                    "url": "https://pro-resource.dasctf.com/resource/oss/a.zip",
+                    "key": "k",
+                    "signature": "s",
+                },
+            )
+        assert data == zip_bytes
+
+    @pytest.mark.asyncio
+    async def test_pull_challenge_refreshes_detail_and_passes_file_meta(
+        self, tmp_path: Path
+    ) -> None:
+        from backend.platforms.adapter import PlatformAdapter
+        from backend.platforms.base import ChallengeInfo
+
+        mock_client = AsyncMock()
+        mock_client.get_challenge_detail = AsyncMock(
+            return_value=ChallengeInfo(
+                id="10663",
+                name="解压缩",
+                category="Misc",
+                value=50,
+                description="解压获取福来阁",
+                files=[{
+                    "name": "解压缩的附件.zip",
+                    "url": "https://pro-resource.dasctf.com/resource/oss/a.zip",
+                    "key": "k1",
+                    "signature": "s1",
+                    "ext": "zip",
+                }],
+            )
+        )
+        mock_client.download_attachment = AsyncMock(return_value=b"PK\x03\x04" + b"\x00" * 8)
+
+        adapter = PlatformAdapter(mock_client)
+        out = await adapter.pull_challenge(
+            {"id": "10663", "name": "解压缩", "category": "Misc", "files": []},
+            str(tmp_path),
+        )
+        dist = Path(out) / "distfiles" / "解压缩的附件.zip"
+        assert dist.exists()
+        assert dist.read_bytes().startswith(b"PK")
+        # 应把完整 file dict 传给 download_attachment，而不是只传名字
+        args = mock_client.download_attachment.await_args
+        assert args is not None
+        assert args.args[0] == "10663"
+        assert isinstance(args.args[1], dict)
+        assert args.args[1]["key"] == "k1"
+
+        import yaml
+
+        meta = yaml.safe_load((Path(out) / "metadata.yml").read_text(encoding="utf-8"))
+        assert meta["description"].startswith("解压")
+        assert meta["value"] == 50
+        assert meta["id"] == "10663"
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

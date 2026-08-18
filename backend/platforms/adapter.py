@@ -32,6 +32,13 @@ def _slugify(name: str) -> str:
     return slug or "challenge"
 
 
+def _safe_filename(name: str) -> str:
+    """Keep original attachment basename but strip path / illegal chars."""
+    base = Path(name).name.strip() or "attachment"
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base)
+    return base or "attachment"
+
+
 class PlatformAdapter:
     """Exposes a CTFd-style interface over any PlatformClient."""
 
@@ -153,44 +160,82 @@ class PlatformAdapter:
         dist_dir = ch_dir / "distfiles"
         dist_dir.mkdir(parents=True, exist_ok=True)
 
+        cid = str(challenge_data.get("id", "") or "")
+        files = list(challenge_data.get("files") or [])
+        description = str(challenge_data.get("description") or "")
+        connection_info = str(challenge_data.get("connection_info") or "")
+        value = challenge_data.get("value", 0)
+        tags = list(challenge_data.get("tags") or [])
+        category = challenge_data.get("category", "")
+
+        # 列表接口常缺附件/描述：有 id 时强制补详情
+        need_detail = (not files) or (not description) or (not connection_info) or (not value)
+        if cid and need_detail:
+            try:
+                detail = await self._client.get_challenge_detail(cid)
+                if not files:
+                    files = list(detail.files or [])
+                if not description:
+                    description = str(detail.description or "")
+                if not connection_info:
+                    connection_info = str(detail.connection_info or "")
+                if not value and getattr(detail, "value", 0):
+                    value = detail.value
+                if not tags and getattr(detail, "tags", None):
+                    tags = list(detail.tags or [])
+                if not category and getattr(detail, "category", ""):
+                    category = detail.category
+                # 缓存 id/name，便于后续 submit / 查找
+                self._by_id[str(detail.id)] = detail
+                if detail.name:
+                    self._by_name[detail.name] = detail
+            except Exception as e:
+                logger.warning("Failed to fetch challenge detail for pull: %s", e)
+
         # Build metadata.yml
         meta = {
             "name": name,
-            "category": challenge_data.get("category", ""),
-            "value": challenge_data.get("value", 0),
-            "description": challenge_data.get("description", ""),
-            "connection_info": challenge_data.get("connection_info", ""),
-            "tags": challenge_data.get("tags", []),
+            "id": cid,
+            "category": category,
+            "value": value,
+            "description": description,
+            "connection_info": connection_info,
+            "tags": tags,
             "solves": challenge_data.get("solves", 0),
+            "files": [
+                {k: f.get(k) for k in ("name", "url", "ext", "key") if f.get(k)}
+                for f in files
+                if isinstance(f, dict)
+            ],
         }
         meta_path = ch_dir / "metadata.yml"
         try:
             import yaml
-            with open(meta_path, "w") as f:
+            with open(meta_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(meta, f, allow_unicode=True)
         except Exception as e:
             logger.warning("Failed to write metadata.yml: %s", e)
 
-        # Download distfiles
-        files = challenge_data.get("files", [])
-        if not files:
-            # Fetch detail to get files
-            try:
-                detail = await self._client.get_challenge_detail(challenge_data.get("id", ""))
-                files = detail.files
-            except Exception as e:
-                logger.warning("Failed to fetch challenge detail: %s", e)
-
-        cid = challenge_data.get("id", "")
+        # Download distfiles（传完整 meta，便于带 key/signature 的资源站下载）
         for f in files:
-            fname = f.get("name", "")
+            if not isinstance(f, dict):
+                continue
+            fname = _safe_filename(str(f.get("name") or "attachment"))
             if not fname:
                 continue
             try:
-                data = await self._client.download_attachment(cid, fname)
+                # 优先传完整 dict；旧 client 只认 str 时回退 name/url
+                data = None
+                try:
+                    data = await self._client.download_attachment(cid, f)  # type: ignore[arg-type]
+                except TypeError:
+                    data = await self._client.download_attachment(
+                        cid, str(f.get("url") or f.get("name") or fname)
+                    )
                 if data:
-                    (dist_dir / fname).write_bytes(data)
-                    logger.info("Downloaded %s", fname)
+                    dest = dist_dir / fname
+                    dest.write_bytes(data)
+                    logger.info("Downloaded %s (%d bytes)", fname, len(data))
                 else:
                     logger.warning("No data for %s", fname)
             except Exception as e:

@@ -217,9 +217,27 @@ class SwarmEngineBackend(EngineBackend):
             await self._emit(run, f"[swarm:{run.mode}] 启动真实求解引擎")
             platform = self.runtime.platform
 
-            # 1. 定位题目
+            # 1. 定位题目（name 精确匹配；兼容 id / 去空白）
             challenges = await platform.fetch_all_challenges()
-            ch = next((c for c in challenges if c.get("name") == run.problem_id), None)
+            pid = str(run.problem_id or "").strip()
+            ch = next((c for c in challenges if str(c.get("name") or "").strip() == pid), None)
+            if ch is None:
+                ch = next((c for c in challenges if str(c.get("id") or "").strip() == pid), None)
+            if ch is None:
+                # 缓存里可能已有（限流导致 list 空时）
+                cached = getattr(platform, "_by_name", {}).get(pid) or getattr(platform, "_by_id", {}).get(pid)
+                if cached is not None:
+                    ch = {
+                        "id": str(getattr(cached, "id", "") or ""),
+                        "name": getattr(cached, "name", pid),
+                        "category": getattr(cached, "category", ""),
+                        "value": getattr(cached, "value", 0),
+                        "description": getattr(cached, "description", ""),
+                        "connection_info": getattr(cached, "connection_info", ""),
+                        "files": list(getattr(cached, "files", []) or []),
+                        "tags": list(getattr(cached, "tags", []) or []),
+                        "solved": bool(getattr(cached, "solved", False)),
+                    }
             if ch is None:
                 raise RuntimeError(f"Challenge not found on platform: {run.problem_id}")
 

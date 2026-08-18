@@ -53,9 +53,10 @@ solver:
   model_temperature: 0.7                     # 模型温度
   retry_delay_seconds: 30                    # 重试间隔
   # 模型选择（逗号分隔，留空=自动检测可用provider）
-  # 性价比组合：千问 + GLM + DeepSeek（均走比赛平台代理）
-  # qwen3.7-plus 均衡 / glm-4.6 智谱性价比 / deepseek-v4-flash 便宜快
-  models: "gateway-bailian/qwen3.7-plus,gateway-bailian/glm-4.6,gateway/deepseek-v4-flash"
+  # 性价比组合：千问 + GLM + DeepSeek 均走比赛平台「百炼」代理（gateway-bailian）
+  # 暂时关闭 deepseek 专属代理 gateway/deepseek-*，改走 gateway-bailian/deepseek-v4-flash
+  # 恢复 deepseek 专属代理时改回: gateway/deepseek-v4-flash
+  models: "gateway-bailian/qwen3.7-plus,gateway-bailian/glm-4.6,gateway-bailian/deepseek-v4-flash"
 
   # Coordinator 后端: "claude" | "codex" | "pydantic" | "auto"
   # pydantic 可用任意 OpenAI 兼容模型（DeepSeek/百炼），无需 claude/codex CLI
@@ -120,8 +121,10 @@ adapter:
   notice_poll: true
   # 按题覆盖模型池（题目名 → 模型列表，逗号分隔）：仅对指定题生效。
   # 例：解压缩 这道题 glm-4.6 一直盲猜乱交 → 换成千问（qwen）+ deepseek 兜底
+  # deepseek 暂走 gateway-bailian（关闭 gateway/deepseek 专属代理）
   challenge_models:
-    解压缩: "gateway-bailian/qwen3.7-plus,gateway-bailian/qwen3.7-flash,gateway/deepseek-v4-flash"
+    解压缩: "gateway-bailian/qwen3.7-plus,gateway-bailian/qwen3.7-flash,gateway-bailian/deepseek-v4-flash"
+    shopping: "gateway-bailian/qwen3.7-plus,gateway-bailian/glm-4.6,gateway-bailian/deepseek-v4-flash"
 
 # ========== Aemeath 总控（OODA 循环 + 模式路由）==========
 orchestrator:

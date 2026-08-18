@@ -52,10 +52,12 @@ DEFAULT_MODELS: list[str] = [
 FALLBACK_MODELS: list[str] = [
     "gateway-bailian/qwen3.7-plus",
     "gateway-bailian/glm-4.6",
-    "gateway/deepseek-v4-flash",
+    # DeepSeek 暂走平台「百炼」代理（关闭 gateway/deepseek 专属代理）
+    "gateway-bailian/deepseek-v4-flash",
     "gateway-bailian/qwen3.7-flash",
     "gateway-bailian/glm-4.7",
-    "gateway/deepseek-v4-pro",
+    "gateway-bailian/deepseek-v4-pro",
+    "gateway/deepseek-v4-flash",  # 备用：恢复 deepseek 专属代理时可用
     "deepseek/deepseek-v4-flash",
     "bailian/qwen3.7-plus",
     "bailian/qwen3.7-flash",
@@ -310,8 +312,9 @@ def resolve_model_settings(spec: str) -> ModelSettings:
                 openai_reasoning_effort="none",
             )
         case "gateway-bailian":
-            # 平台网关代理的百炼与直连百炼行为一致：qwen3.x 默认思考模式与
-            # tool_choice='required' 冲突，需用 reasoning_effort='none' 关闭思考。
+            # 平台「百炼」代理（qwen/glm/deepseek 均可能默认开思考）：
+            # tool_choice=required 与思考模式冲突 → 统一 reasoning_effort=none。
+            # deepseek 也必须关思考（实测不关会 400 InvalidParameter tool_choice）。
             return OpenAIChatModelSettings(
                 max_tokens=128_000,
                 openai_reasoning_effort="none",
