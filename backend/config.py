@@ -89,6 +89,7 @@ class YamlConfigSource(PydanticBaseSettingsSource):
             "auto_solve": "adapter_auto_solve",
             "auto_poll_interval": "adapter_auto_poll_interval",
             "notice_poll": "adapter_notice_poll",
+            "challenge_models": "adapter_challenge_models",
         },
         "orchestrator": {
             "enabled": "orchestrator_enabled",
@@ -256,6 +257,9 @@ class Settings(BaseSettings):
     adapter_auto_poll_interval: float = 5.0
     # 是否启用「公告驱动拉题」（true=每轮先拉公告，有变化才拉赛题；false=每轮直接拉赛题）
     adapter_notice_poll: bool = True
+    # 按题覆盖模型池：题目名 → 模型 spec 列表（逗号分隔）。仅对指定题生效，
+    # 用于个别题不想用某个模型（如某题模型乱猜）时单独指定。
+    adapter_challenge_models: dict[str, str] = {}
 
     # ========== Aemeath 总控（config.yaml orchestrator.*）==========
     orchestrator_enabled: bool = True

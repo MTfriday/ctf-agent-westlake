@@ -266,6 +266,15 @@ class SwarmEngineBackend(EngineBackend):
 
             # 实时健康感知：跳过当前被禁用的模型，只用可用模型求解
             active_specs = self.runtime.get_active_model_specs()
+            # 按题覆盖模型池（config.yaml adapter.challenge_models）：
+            # 可对个别题指定专用模型（如某题某模型乱猜时单独换掉）
+            override = (getattr(self.runtime.settings, "adapter_challenge_models", {}) or {})
+            ov_specs = (override.get(run.problem_id) or "").strip()
+            if ov_specs:
+                active_specs = [s.strip() for s in ov_specs.split(",") if s.strip()]
+                logger.info(
+                    "challenge %r: override models -> %s", run.problem_id, active_specs
+                )
             if not active_specs:
                 # 全部被禁用 → 强制重置一次（可能是临时误判），否则直接失败
                 logger.warning("all models disabled — resetting health for %s", run.problem_id)

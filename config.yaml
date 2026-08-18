@@ -118,6 +118,10 @@ adapter:
   auto_poll_interval: 5
   # 公告驱动拉题：true=每轮先拉公告，有变化才拉赛题；false=每轮直接拉赛题
   notice_poll: true
+  # 按题覆盖模型池（题目名 → 模型列表，逗号分隔）：仅对指定题生效。
+  # 例：解压缩 这道题 glm-4.6 一直盲猜乱交 → 换成千问（qwen）+ deepseek 兜底
+  challenge_models:
+    解压缩: "gateway-bailian/qwen3.7-plus,gateway-bailian/qwen3.7-flash,gateway/deepseek-v4-flash"
 
 # ========== Aemeath 总控（OODA 循环 + 模式路由）==========
 orchestrator:
