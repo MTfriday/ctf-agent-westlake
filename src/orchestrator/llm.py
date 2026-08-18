@@ -46,11 +46,16 @@ class OpenAICompatLLM:
         api_key: Optional[str] = None,
         model: str = "qwen3.8-max",
         timeout: float = 30.0,
+        full_endpoint: bool = False,
     ) -> None:
+        """full_endpoint=True：base_url 本身即完整 Chat Completions 端点
+        （如西湖论剑 llm-gateway 代理），不再拼接 /chat/completions。
+        """
         self.base_url = (base_url or _DEFAULT_BASE_URL).rstrip("/")
         self.api_key = api_key or ""
         self.model = model
         self.timeout = timeout
+        self.full_endpoint = full_endpoint
 
     @property
     def available(self) -> bool:
@@ -81,10 +86,10 @@ class OpenAICompatLLM:
             payload["max_tokens"] = max_tokens
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         try:
+            # full_endpoint：base_url 本身即完整端点（llm-gateway 代理），不拼路径
+            url = self.base_url if self.full_endpoint else f"{self.base_url}/chat/completions"
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions", json=payload, headers=headers
-                )
+                resp = await client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
             return data["choices"][0]["message"]["content"]
@@ -101,8 +106,17 @@ class OpenAICompatLLM:
 
 
 def llm_from_settings(settings: Any, model: str) -> Optional[OpenAICompatLLM]:
-    """从 Settings 构建百炼 LLM；未配 key 返回 None（调用方走规则兜底）。"""
+    """从 Settings 构建 LLM；未配 key 返回 None（调用方走规则兜底）。
+
+    优先走 gateway-bailian 代理通道（西湖论剑 llm-gateway，绕过 MaaS 直连配额），
+    未配置时回退到百炼直连。
+    """
     key = getattr(settings, "bailian_api_key", "") or getattr(settings, "openai_api_key", "")
-    base = getattr(settings, "bailian_base_url", "") or _DEFAULT_BASE_URL
-    llm = OpenAICompatLLM(base_url=base, api_key=key, model=model)
+    gateway = getattr(settings, "gateway_bailian_base_url", "") or ""
+    bailian = getattr(settings, "bailian_base_url", "") or _DEFAULT_BASE_URL
+    if gateway:
+        # gateway-bailian base_url 是完整 Chat Completions 端点，不拼 /chat/completions
+        llm = OpenAICompatLLM(base_url=gateway, api_key=key, model=model, full_endpoint=True)
+    else:
+        llm = OpenAICompatLLM(base_url=bailian, api_key=key, model=model)
     return llm if llm.available else None
