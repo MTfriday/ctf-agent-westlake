@@ -5,6 +5,11 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TERM=xterm
+ENV HTTP_PROXY=http://192.168.174.1:10809     HTTPS_PROXY=http://192.168.174.1:10809     http_proxy=http://192.168.174.1:10809     https_proxy=http://192.168.174.1:10809     NO_PROXY=localhost,127.0.0.1,mirrors.tuna.tsinghua.edu.cn,pypi.tuna.tsinghua.edu.cn     no_proxy=localhost,127.0.0.1,mirrors.tuna.tsinghua.edu.cn,pypi.tuna.tsinghua.edu.cn     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple     PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+# 替换国内清华apt源加速
+RUN sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list && \
+    sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
 
 # ── 镜像源（加速 apt / pip 下载）──────────────────────────────────────────────
 # apt: 把 archive.ubuntu.com / security.ubuntu.com 替换为清华镜像
@@ -82,17 +87,17 @@ RUN apt-get update && apt-get install -y curl gnupg2 \
     && rm -rf /var/lib/apt/lists/* \
     || echo "Podman install failed (non-fatal) — nested containers will not be available"
 
-# ── radare2 ───────────────────────────────────────────────────────────────────
-RUN git clone --depth=1 https://github.com/radareorg/radare2 /tmp/r2 \
-    && cd /tmp/r2 && bash sys/install.sh --install \
+# ── radare2（本地源码 COPY，不再git clone） ───────────────────────────────────
+COPY ./src/radare2 /tmp/r2
+RUN cd /tmp/r2 && bash sys/install.sh --install \
     && ldconfig \
     && r2 -v \
     && rm -rf /tmp/r2
 
 # ── flatter (fast lattice reduction — Keegan Ryan's fork) ────────────────────
-RUN git clone --depth=1 https://github.com/keeganryan/flatter /tmp/flatter \
-    && cmake -S /tmp/flatter -B /tmp/flatter/build \
-        -DCMAKE_BUILD_TYPE=Release \
+COPY ./src/flatter /tmp/flatter
+RUN cmake -S /tmp/flatter -B /tmp/flatter/build \
+    -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /tmp/flatter/build -j$(nproc) \
     && cmake --install /tmp/flatter/build \
     && ldconfig \
@@ -107,9 +112,9 @@ RUN gem install zsteg
 
 # ── stegseek (build from source — pre-built .deb is amd64 only) ──────────────
 RUN apt-get update && apt-get install -y libmhash-dev libmcrypt-dev libjpeg-dev zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    && git clone --depth=1 https://github.com/RickdeJager/stegseek /tmp/stegseek \
-    && cmake -S /tmp/stegseek -B /tmp/stegseek/build \
+    && rm -rf /var/lib/apt/lists/*
+COPY ./src/stegseek /tmp/stegseek
+RUN cmake -S /tmp/stegseek -B /tmp/stegseek/build \
     && cmake --build /tmp/stegseek/build --target install \
     && rm -rf /tmp/stegseek
 
@@ -146,8 +151,8 @@ RUN (pip3 install --no-cache-dir --ignore-installed sympy \
     && pip3 install --no-cache-dir keras
 
 # ── RsaCtfTool (catch-all automated RSA/factoring attacks) ────────────────────
-RUN git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool /opt/RsaCtfTool \
-    && pip3 install --no-cache-dir /opt/RsaCtfTool
+COPY ./src/RsaCtfTool /opt/RsaCtfTool
+RUN pip3 install --no-cache-dir /opt/RsaCtfTool
 
 # ── CADO-NFS (Number Field Sieve — large integer factoring + DLP) ─────────────
 RUN git clone --depth=1 https://gitlab.inria.fr/cado-nfs/cado-nfs.git /opt/cado-nfs \

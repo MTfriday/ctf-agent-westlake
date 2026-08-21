@@ -8,12 +8,14 @@ import logging
 import shlex
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import aiodocker
 
+from backend.sandbox_registry import SandboxOp, append_op, register, unregister
 from backend.sandbox_security import check_dangerous_command
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,7 @@ async def _track_stop() -> None:
 async def cleanup_orphan_containers() -> None:
     """Kill any leftover ctf-agent containers from a previous run."""
     try:
-        docker = aiodocker.Docker()
+        docker = aiodocker.Docker(url="unix:///var/run/docker.sock")
         try:
             containers = await docker.containers.list(
                 all=True,
@@ -86,6 +88,9 @@ class DockerSandbox:
     challenge_dir: str
     memory_limit: str = "16g"
     workspace_dir: str = ""
+    # 透明化沙箱：注册到全局 registry 的归属信息（由 Solver 创建时填写）
+    challenge_name: str = ""
+    model_spec: str = ""
     _container: Any = field(default=None, repr=False)
     _docker: Any = field(default=None, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -112,7 +117,7 @@ class DockerSandbox:
     async def start(self) -> None:
         sem = _start_semaphore or asyncio.Semaphore(50)
         async with sem:
-            self._docker = aiodocker.Docker()
+            self._docker = aiodocker.Docker(url="unix:///var/run/docker.sock")
 
             self.workspace_dir = tempfile.mkdtemp(prefix="ctf-workspace-")
 
@@ -150,6 +155,9 @@ class DockerSandbox:
             info = await self._container.show()
             short_id = info["Id"][:12]
             logger.info("Sandbox started: %s", short_id)
+            if self.challenge_name:
+                register(self.challenge_name, self._container.id, self.image,
+                         self.workspace_dir, self.model_spec, sandbox=self)
 
     async def exec(self, command: str, timeout_s: int = 300) -> ExecResult:
         if not self._container:
@@ -161,12 +169,32 @@ class DockerSandbox:
             logger.warning("Blocked dangerous command: %.100s", command)
             return ExecResult(exit_code=-1, stdout="", stderr=warning)
 
+        _t0 = time.monotonic()
         async with self._lock:
             try:
-                return await self._exec_inner(command, timeout_s)
+                result = await self._exec_inner(command, timeout_s)
             except aiodocker.exceptions.DockerError as e:
                 # Container was deleted (e.g., sibling solver found the flag)
-                return ExecResult(exit_code=-1, stdout="", stderr=f"Container gone: {e}")
+                result = ExecResult(exit_code=-1, stdout="", stderr=f"Container gone: {e}")
+        self._record_op(command, result, time.monotonic() - _t0)
+        return result
+
+    def _record_op(self, command: str, result: ExecResult, duration_s: float) -> None:
+        # 透明化沙箱：把每条命令及结果记入全局 registry（网页端操作流）
+        if not self._container:
+            return
+        try:
+            append_op(self._container.id, SandboxOp(
+                ts=time.time(),
+                model_spec=self.model_spec,
+                command=(command or "")[:4000],
+                exit_code=result.exit_code,
+                stdout_head=(result.stdout or "")[:2000],
+                stderr_head=(result.stderr or "")[:1000],
+                duration_s=duration_s,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _exec_inner(self, command: str, timeout_s: int) -> ExecResult:
         # Wrap command with `timeout` so the container kills the process on expiry.
@@ -281,6 +309,7 @@ class DockerSandbox:
     async def stop(self) -> None:
         if self._container:
             try:
+                unregister(self._container.id)
                 await self._container.delete(force=True)
             except Exception:
                 pass

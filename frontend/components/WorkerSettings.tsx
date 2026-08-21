@@ -22,8 +22,9 @@ import {
 } from "@/lib/useRun";
 import { useT } from "@/lib/i18n";
 import { Icon } from "@/components/Icon";
+import { ModelsPanelSection } from "@/components/ModelsPanel";
 
-type Tab = "llm" | "agent";
+type Tab = "llm" | "agent" | "models";
 
 const BACKENDS = ["swarm", "hybrid", "orchestrated"] as const;
 
@@ -122,9 +123,17 @@ function Help({ tip }: { tip: React.ReactNode }) {
   );
 }
 
-export function WorkerSettings({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function WorkerSettings({
+  open,
+  onClose,
+  initialTab,
+}: {
+  open: boolean;
+  onClose: () => void;
+  initialTab?: Tab;
+}) {
   const t = useT();
-  const [tab, setTab] = useState<Tab>("llm");
+  const [tab, setTab] = useState<Tab>(initialTab ?? "llm");
   const [draft, setDraft] = useState<AemeathConfig | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -311,6 +320,10 @@ export function WorkerSettings({ open, onClose }: { open: boolean; onClose: () =
               <Icon name="cpu" size={16} />
               <span>Agent 编排</span>
             </button>
+            <button type="button" className={`ws2-tab ${tab === "models" ? "on" : ""}`} onClick={() => setTab("models")} aria-current={tab === "models"}>
+              <Icon name="layers" size={16} />
+              <span>模型池</span>
+            </button>
           </nav>
 
           <div className="ws2-content">
@@ -411,6 +424,18 @@ export function WorkerSettings({ open, onClose }: { open: boolean; onClose: () =
               </section>
             )}
 
+            {tab === "models" && (
+              <section>
+                <div className="ws-section-head">
+                  <h3>求解器模型池</h3>
+                  <span>
+                    config.yaml solver.models 为单一数据源（与默认 Worker 配置统一）。
+                    配额耗尽自动剔除（403）；可实时添加/删除，运行中的 lane 热插拔生效。
+                  </span>
+                </div>
+                <ModelsPanelSection />
+              </section>
+            )}
             {tab === "agent" && (
               <section>
                 <div className="ws-section-head">

@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -51,6 +52,16 @@ class SlabClient(PlatformClient):
         self.rate_limiter = RateLimiter(rps=rate_limit_rps)
         self._client: httpx.AsyncClient | None = None
         self._last_error = ""
+        # 429 冷却门：命中平台限流后 5 分钟内快速失败、不再打平台，
+        # 让限流窗口自然冷却（实测窗口可达 10+ 分钟，反复点火会越烧越长）
+        self._cooldown_until = 0.0
+        self._cooldown_seconds = 300.0
+
+    def in_cooldown(self) -> bool:
+        """平台是否处于 429 冷却期（调用方应整轮跳过，避免测试窗口）。"""
+        import time as _t
+
+        return _t.time() < self._cooldown_until
         # 缓存：exerciseId(str) -> ChallengeInfo
         self._by_id: dict[str, ChallengeInfo] = {}
 
@@ -83,12 +94,41 @@ class SlabClient(PlatformClient):
         self, method: str, path: str, *, json: dict | None = None, params: dict | None = None
     ) -> dict[str, Any]:
         """发起请求并解统一json。失败抛 RuntimeError(message)。"""
+        import time as _time
+
+        # 冷却期内快速失败（不落网），避免在限流窗口上反复点火
+        now = _time.time()
+        if now < self._cooldown_until:
+            remain = int(self._cooldown_until - now)
+            raise RuntimeError(f"slab API rate limited (cooldown {remain}s)")
+
+        import httpx as _httpx
+
         async with self.rate_limiter:
             client = await self._ensure_client()
-            resp = await client.request(method, path, json=json, params=params)
+            last_exc: Exception | None = None
+            # 传输层错误 / 5xx：指数退避重试 2 次（1s/2s）。VM 网络间歇性
+            # 抖动（ConnectTimeout/DNS）时同步自愈；429 走下面冷却门不重试
+            # （限流窗口上反复点火只会越烧越长）。
+            for attempt in range(3):
+                try:
+                    resp = await client.request(method, path, json=json, params=params)
+                    last_exc = None
+                    break
+                except _httpx.TransportError as e:  # noqa: BLE001
+                    last_exc = e
+                    if attempt < 2:
+                        await asyncio.sleep(0.5 * (2 ** attempt))
+            if last_exc is not None:
+                self._last_error = f"transport error: {last_exc}"
+                raise RuntimeError(self._last_error)
+            if resp.status_code >= 500:
+                self._last_error = f"HTTP {resp.status_code}"
+                raise RuntimeError(self._last_error)
 
         if resp.status_code == 429:
             self._last_error = "rate limited"
+            self._cooldown_until = _time.time() + self._cooldown_seconds
             raise RuntimeError("slab API rate limited (HTTP 429)")
         try:
             payload = resp.json()
@@ -110,8 +150,13 @@ class SlabClient(PlatformClient):
 
     # ── 题目列表（两级）────────────────────────────────────────────────────
 
-    async def fetch_challenges(self) -> list[ChallengeInfo]:
-        """拉取全部题目：分类 → corpus 子题，逐题补详情拿附件/靶机。"""
+    async def fetch_challenges(self, light: bool = False) -> list[ChallengeInfo]:
+        """拉取全部题目：分类 → corpus 子题。
+
+        light=True：只返回列表级信息（id/name/category/solved），不逐题
+        补详情——seed/启动路径用它，避免 list+逐题 detail 多连发触发平台
+        429 冷却门（p15）。需要附件/靶机时对目标题单独 get_challenge_detail。
+        """
         self._by_id = {}
         all_challenges: list[ChallengeInfo] = []
         try:
@@ -135,18 +180,19 @@ class SlabClient(PlatformClient):
                     solved=bool(item.get("hasSolved", False)),
                     raw=item,
                 )
-                # 补详情（附件/靶机/描述）
-                try:
-                    detail = await self.get_challenge_detail(cid)
-                    info.description = detail.description
-                    info.value = detail.value
-                    info.files = detail.files
-                    info.connection_info = detail.connection_info
-                    info.tags = detail.tags
-                    info.solved = info.solved or detail.solved
-                    info.raw = detail.raw or item
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("slab detail %s failed: %s", cid, e)
+                # 补详情（附件/靶机/描述）——light 模式跳过，避免多连发 429
+                if not light:
+                    try:
+                        detail = await self.get_challenge_detail(cid)
+                        info.description = detail.description
+                        info.value = detail.value
+                        info.files = detail.files
+                        info.connection_info = detail.connection_info
+                        info.tags = detail.tags
+                        info.solved = info.solved or detail.solved
+                        info.raw = detail.raw or item
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("slab detail %s failed: %s", cid, e)
                 self._by_id[cid] = info
                 all_challenges.append(info)
 
@@ -198,6 +244,15 @@ class SlabClient(PlatformClient):
         endpoints 可用（或 expireTime 到 / 超时）。
         """
         cid = str(challenge_id)
+        # api_doc: only build when isNeedInit=true. Non-exclusive challenges
+        # (endpointType != monopoly) reject build with 40409 - skip the call.
+        try:
+            raw = (await self.get_challenge_detail(cid)).raw or {}
+        except Exception:  # noqa: BLE001
+            raw = {}
+        if not raw.get("isNeedInit"):
+            entry = _connection_of(raw.get("endpoints")) if raw else ""
+            return _SlabEnv(entry or "", raw=raw)
         try:
             await self._request(
                 "POST", f"{_ENV_PATH}/ctf/build-exercise-env", json={"exerciseId": int(cid)}
@@ -389,18 +444,31 @@ class _SlabEnv:
 
 
 def _files_of(attachment: Any) -> list[dict[str, str]]:
-    """attachment → [{name, url, ext}]。"""
-    if not isinstance(attachment, dict):
-        return []
-    files = attachment.get("files") or []
+    """attachment → [{name, url, ext}]。
+
+    兼容平台实际返回的三种格式：
+    - 文档格式 {"files": [{name, url, ext}, ...]}
+    - 实测格式 扁平对象 {key, signature, url, name, previewUrl}（url/name 在顶层）
+    - 列表格式 [{name, url, ext}, ...]
+    """
     out: list[dict[str, str]] = []
-    for f in files if isinstance(files, list) else []:
+
+    def _pick(f: Any) -> None:
         if isinstance(f, dict) and f.get("url"):
             out.append({
                 "name": str(f.get("name") or "attachment"),
                 "url": str(f.get("url")),
                 "ext": str(f.get("ext") or ""),
             })
+
+    if isinstance(attachment, dict):
+        if attachment.get("url"):
+            _pick(attachment)  # 扁平格式：attachment 本身即附件描述
+        for f in attachment.get("files") or []:
+            _pick(f)
+    elif isinstance(attachment, list):
+        for f in attachment:
+            _pick(f)
     return out
 
 

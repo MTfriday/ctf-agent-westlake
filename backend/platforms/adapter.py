@@ -59,9 +59,12 @@ class PlatformAdapter:
             })
         return stubs
 
-    async def fetch_all_challenges(self) -> list[dict[str, Any]]:
-        """Full challenge list with metadata."""
-        challenges = await self._client.fetch_challenges()
+    async def fetch_all_challenges(self, light: bool = False) -> list[dict[str, Any]]:
+        """Full challenge list with metadata.
+
+        light=True：只返回列表级信息（不逐题拉详情，避免平台 429 连发）。
+        """
+        challenges = await self._client.fetch_challenges(light=light)
         result: list[dict[str, Any]] = []
         for c in challenges:
             self._by_name[c.name] = c

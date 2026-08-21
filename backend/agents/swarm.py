@@ -76,6 +76,11 @@ class ChallengeSwarm:
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
+    # 动态 lane 注册表（spec → asyncio task）：run() 循环基于它增删 solver，
+    # 支持运行时 spawn/kill worker（模型池扩容/杀进程）
+    _tasks: dict[str, asyncio.Task] = field(default_factory=dict)
+    # lane 结束回调（spec, reason: finished|error|killed）——供 adapter 通知前端
+    on_lane_finished: Callable[[str, str], None] | None = None
     findings: dict[str, str] = field(default_factory=dict)
     winner: SolverResult | None = None
     confirmed_flag: str | None = None
@@ -245,6 +250,10 @@ class ChallengeSwarm:
             result, final_solver = await self._run_solver_loop(solver, model_spec)
             solver = final_solver
             return result
+        except asyncio.CancelledError:
+            if self.on_lane_finished is not None:
+                self.on_lane_finished(model_spec, "killed")
+            raise
         except Exception as e:
             logger.error(f"[{self.meta.name}/{model_spec}] Fatal: {e}", exc_info=True)
             # 致命异常也上报健康（网络错误/认证错误等），以便实时剔除不可用模型
@@ -252,6 +261,8 @@ class ChallengeSwarm:
                 disabled = self.health.report_failure(model_spec, str(e))
                 if disabled and self.on_model_disabled is not None:
                     self.on_model_disabled(model_spec, str(e)[:200])
+            if self.on_lane_finished is not None:
+                self.on_lane_finished(model_spec, "error")
             return None
         finally:
             await solver.stop()
@@ -394,39 +405,72 @@ class ChallengeSwarm:
         return result, solver
 
     async def run(self) -> SolverResult | None:
-        """Run all solvers in parallel. Returns the winner's result or None."""
-        tasks = [
-            asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}")
-            for spec in self.model_specs
-        ]
+        """Run all solvers in parallel. Returns the winner's result or None.
+
+        基于 self._tasks 动态增删：spawn_solver/kill_solver 在运行中可
+        增删 lane（用户网页杀 worker / 加模型）。"""
+        for spec in self.model_specs:
+            self._tasks[spec] = asyncio.create_task(
+                self._run_solver(spec), name=f"solver-{spec}"
+            )
 
         try:
-            while tasks:
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-
+            while self._tasks:
+                done, _pending = await asyncio.wait(
+                    list(self._tasks.values()), return_when=asyncio.FIRST_COMPLETED
+                )
                 for task in done:
+                    spec = next((s for s, tt in self._tasks.items() if tt is task), None)
+                    if spec is None:
+                        continue
+                    self._tasks.pop(spec, None)
+                    if task.cancelled():
+                        continue
                     try:
                         result = task.result()
                     except Exception:
                         continue
                     if result and result.status == FLAG_FOUND:
                         self.cancel_event.set()
-                        for p in pending:
-                            p.cancel()
-                        await asyncio.gather(*pending, return_exceptions=True)
+                        for tt in self._tasks.values():
+                            tt.cancel()
+                        await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+                        self._tasks.clear()
                         return result
-
-                tasks = list(pending)
 
             self.cancel_event.set()
             return self.winner
         except Exception as e:
             logger.error(f"[{self.meta.name}] Swarm error: {e}", exc_info=True)
             self.cancel_event.set()
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            for tt in self._tasks.values():
+                tt.cancel()
+            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
             return None
+
+    async def spawn_solver(self, model_spec: str) -> bool:
+        """动态添加一条 solver lane（模型池运行时扩容）。"""
+        t = self._tasks.get(model_spec)
+        if t is not None and not t.done():
+            return False
+        if model_spec not in self.model_specs:
+            self.model_specs.append(model_spec)
+        self._tasks[model_spec] = asyncio.create_task(
+            self._run_solver(model_spec), name=f"solver-{model_spec}"
+        )
+        return True
+
+    async def kill_solver(self, model_spec: str) -> bool:
+        """取消一条 solver lane（worker 杀进程）。"""
+        t = self._tasks.pop(model_spec, None)
+        if t is None or t.done():
+            return False
+        t.cancel()
+        try:
+            await t
+        except BaseException:
+            pass
+        return True
 
     def kill(self) -> None:
         """Cancel all agents for this challenge."""
@@ -441,8 +485,8 @@ class ChallengeSwarm:
             "agents": {
                 spec: {
                     "findings": self.findings.get(spec, ""),
-                    "status": "running" if spec in self.solvers and not self.cancel_event.is_set()
-                             else ("won" if self.winner and self.winner.flag else "finished"),
+                    "status": ("running" if spec in self._tasks and not self._tasks[spec].done()
+                               else ("won" if self.winner and self.winner.flag else "finished")),
                 }
                 for spec in self.model_specs
             },

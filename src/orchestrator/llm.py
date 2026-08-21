@@ -17,6 +17,24 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
+_GATEWAY_MARKER = "/llm-gateway/proxy/e/"
+_shared_client: Optional[httpx.AsyncClient] = None
+
+
+def get_shared_llm_client(timeout: float) -> httpx.AsyncClient:
+    """Reuse one AsyncClient (keep-alive) so repeated LLM calls do fewer DNS lookups.
+
+    VM DNS (192.168.174.2) is flaky; a fresh client per call forces a new
+    resolution each time. A pooled client keeps connections alive.
+    """
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=30.0),
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+        )
+    return _shared_client
+
 
 class LLMError(RuntimeError):
     """LLM 调用失败（未配 key / 网络错误 / 非 JSON 响应）。"""
@@ -51,6 +69,9 @@ class OpenAICompatLLM:
         self.api_key = api_key or ""
         self.model = model
         self.timeout = timeout
+        # xihu llm-gateway base_url is a complete Chat Completions endpoint:
+        # POST directly to it, never append /chat/completions (would 404).
+        self._full_endpoint = _GATEWAY_MARKER in self.base_url
 
     @property
     def available(self) -> bool:
@@ -81,12 +102,15 @@ class OpenAICompatLLM:
             payload["max_tokens"] = max_tokens
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions", json=payload, headers=headers
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            url = (
+                self.base_url
+                if self._full_endpoint
+                else f"{self.base_url}/chat/completions"
+            )
+            client = get_shared_llm_client(self.timeout)
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
             return data["choices"][0]["message"]["content"]
         except LLMError:
             raise
@@ -103,6 +127,10 @@ class OpenAICompatLLM:
 def llm_from_settings(settings: Any, model: str) -> Optional[OpenAICompatLLM]:
     """从 Settings 构建百炼 LLM；未配 key 返回 None（调用方走规则兜底）。"""
     key = getattr(settings, "bailian_api_key", "") or getattr(settings, "openai_api_key", "")
-    base = getattr(settings, "bailian_base_url", "") or _DEFAULT_BASE_URL
+    base = (
+        getattr(settings, "gateway_bailian_base_url", "")
+        or getattr(settings, "bailian_base_url", "")
+        or _DEFAULT_BASE_URL
+    )
     llm = OpenAICompatLLM(base_url=base, api_key=key, model=model)
     return llm if llm.available else None

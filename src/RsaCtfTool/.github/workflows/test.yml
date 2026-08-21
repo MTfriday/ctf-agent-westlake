@@ -1,0 +1,48 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    name: test (${{ matrix.python.id }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    strategy:
+      matrix:
+        python:
+          - { id: "python3.9", version: "3.9" }
+          - { id: "python3.10", version: "3.10" }
+      fail-fast: false
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python.version }}
+        architecture: x64
+
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-${{ matrix.python.id }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.python.id }}-pip-
+
+    - name: Install system dependencies
+      run: sudo apt update && sudo apt install -y libgmp3-dev libmpc-dev
+
+    - name: Install project
+      run: |
+        pip install wheel sagemath pytest
+        pip install -e .
+
+    - name: Run tests
+      run: RsaCtfTool --tests --attack all
+
+    - name: Run attack tests with pytest
+      # Ignore slow and network based tests
+      run: pytest tests/test_attacks.py -v -m "not slow and not network"

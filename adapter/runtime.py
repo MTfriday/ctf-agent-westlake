@@ -115,6 +115,8 @@ class SolverRuntime:
         target: str = "",
         attachments: Optional[list[str]] = None,
         mode: str = "auto",
+        category: str = "",
+        no_submit: bool = False,
     ) -> dict[str, Any]:
         """engine_launch_solver — 启动求解引擎，返回 run_id。"""
         # 执行前自动注入黑板上下文（死路/发现/计划），避免重复失败路径（蓝皮书：执行前注入）
@@ -122,7 +124,8 @@ class SolverRuntime:
         if blackboard_ctx and "暂无历史记忆" not in blackboard_ctx:
             prompt = (prompt + "\n\n" + blackboard_ctx).strip() if prompt else blackboard_ctx
         run_id = await self.engine.launch(
-            problem_id, prompt=prompt, target=target, attachments=attachments, mode=mode
+            problem_id, prompt=prompt, target=target, attachments=attachments,
+            mode=mode, category=category, no_submit=no_submit or self.no_submit
         )
         # 黑板：记录本次求解意图
         self.store.create_intent(

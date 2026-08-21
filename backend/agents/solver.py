@@ -185,6 +185,8 @@ class Solver:
             image=getattr(settings, "sandbox_image", "ctf-sandbox"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
+            challenge_name=meta.name,
+            model_spec=model_spec,
         )
         self.use_vision = supports_vision(model_spec)
         self.deps = SolverDeps(
@@ -264,7 +266,10 @@ class Solver:
 
         try:
             from pydantic_ai.usage import UsageLimits
-            result = await self._agent.run(
+            from backend.llm_net import run_with_retry
+
+            result = await run_with_retry(
+                self._agent,
                 "Solve this CTF challenge." if not self._messages else "Continue solving.",
                 deps=self.deps,
                 message_history=self._messages if self._messages else None,

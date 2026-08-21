@@ -138,7 +138,9 @@ async def run_pydantic_coordinator(
         # 无 request_limit：coordinator 首次 turn 要 spawn 所有未解题（几十次 LLM
         # 往返），pydantic-ai 默认 request_limit=50 会在中途抛 UsageLimitExceeded。
         from pydantic_ai.usage import UsageLimits
-        result = await agent.run(msg, usage_limits=UsageLimits(request_limit=None))
+        from backend.llm_net import run_with_retry
+
+        result = await run_with_retry(agent, msg, usage_limits=UsageLimits(request_limit=None))
         # Log cost if available
         try:
             usage = result.usage  # pydantic-ai 2.18+: RunUsage attribute, not a method

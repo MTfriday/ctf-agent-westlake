@@ -4,9 +4,9 @@
   "private": true,
   "description": "Project Muteki web command deck — a conversation-first frontend over the agent SSE stream with a live fact graph, blackboard, worker dock, and HITL controls.",
   "scripts": {
-    "dev": "next dev -p 3999 -H 127.0.0.1",
+    "dev": "next dev -p 3999 -H 0.0.0.0",
     "build": "next build",
-    "start": "next start -p 3999 -H 127.0.0.1",
+    "start": "next start -p 3999 -H 0.0.0.0",
     "lint": "next lint"
   },
   "dependencies": {

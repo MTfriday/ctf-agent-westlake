@@ -1,0 +1,29 @@
+name: Lint Python
+
+on: [push, pull_request]
+
+jobs:
+  lint_python:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install flake8 ruff
+
+    - name: Lint with flake8
+      run: |
+        flake8 src tests \
+               --ignore=E126,E203,E401,E701,E711,E712,E722,E731,E741,F401,F841,W291,W503,W605 \
+               --count --max-complexity=62 --max-line-length=3266 --show-source --statistics
+               
+    - name: Check formatting with ruff
+      run: |
+        ruff format --check src tests

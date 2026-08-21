@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import json
 import time
+from dataclasses import asdict
 from typing import Any, Optional
 
 import httpx
@@ -23,6 +25,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
+
+from backend import sandbox_registry
 
 from adapter.deps import get_runtime
 from adapter.muteki.auth import (
@@ -124,9 +128,20 @@ async def list_runs(
 
 
 @router.post("/api/runs")
-async def create_run(manager: Any = Depends(_manager)) -> Any:
-    entry = manager.create()
-    return {"run_id": entry.run_id}
+async def create_run(request: Request, manager: Any = Depends(_manager)) -> Any:
+    """创建 run：body {name?} → 指定名字（解题模式/平台题同名），否则随机 run-XXXX。"""
+    body = await _body(request, allow_empty=True)
+    entry = manager.create(str(body.get("name") or ""))
+    return {"run_id": entry.run_id, "name": entry.name}
+
+
+@router.get("/api/runs/{run_id}")
+async def get_run(run_id: str, manager: Any = Depends(_manager)) -> Any:
+    """单 run 详情：summary + 历史事件（前端 run 详情页）。"""
+    entry = manager.get(run_id)
+    if entry is None:
+        return JSONResponse({"error": "run not found"}, status_code=404)
+    return {**entry.summary(), "history": [asdict(m) for m in entry.history]}
 
 
 @router.patch("/api/runs/{run_id}")
@@ -235,6 +250,58 @@ async def upload_files(
             shutil.copyfileobj(f.file, out)
         saved.append({"name": safe, "path": str(dest.resolve()), "size": dest.stat().st_size})
     return {"files": saved}
+
+
+# ── 透明化沙箱（0x01）：容器操作流 + 文件结构 ─────────────────────────────
+@router.get("/api/runs/{run_id}/sandbox")
+async def run_sandbox(run_id: str, manager: Any = Depends(_manager)) -> Any:
+    """容器的当前状态：存活容器列表 + 文件结构树（find 快照）。"""
+    entry = manager.get(run_id)
+    problem_id = entry.run_id if entry else run_id
+    try:
+        tree = await sandbox_registry.tree_rows(problem_id)
+    except Exception:  # noqa: BLE001
+        tree = []
+    return {
+        "run_id": run_id,
+        "problem_id": problem_id,
+        "containers": sandbox_registry.containers(problem_id),
+        "tree": tree,
+    }
+
+
+@router.get("/api/runs/{run_id}/sandbox/ops")
+async def run_sandbox_ops(run_id: str, limit: int = 300,
+                          manager: Any = Depends(_manager)) -> Any:
+    """容器操作流（每条命令 + 退出码 + 输出摘要），时间升序。"""
+    entry = manager.get(run_id)
+    problem_id = entry.run_id if entry else run_id
+    ops = sandbox_registry.ops(problem_id)
+    return {"run_id": run_id, "total": len(ops), "ops": ops[-max(1, min(limit, 2000)):]}
+
+
+# ── 平台同步 / 题目列表（比赛模式，0x03）────────────────────────────────
+@router.post("/api/platform/sync")
+async def platform_sync(manager: Any = Depends(_manager)) -> Any:
+    """强制重拉平台题目列表（新题自动预注册 + 检测已解出）。"""
+    try:
+        return await manager.sync_challenges()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"平台同步失败: {e}")
+
+
+@router.get("/api/platform/challenges")
+async def platform_challenges(runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    """平台题目原始列表（供比赛模式面板展示）。
+
+    light=True（p16）：只打 list 接口 1 个请求——全量逐题 detail 4 连发必中
+    平台 429 冷却门，造成"一会能同步、一会冷却期内必失败"。分值/附件数
+    不再列表展示；启动题目时 _run_swarm 会单题补全详情。"""
+    try:
+        challenges = await runtime.platform.fetch_all_challenges(light=True)
+        return {"challenges": challenges}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"平台不可达: {e}")
 
 
 # ── events (SSE) ─────────────────────────────────────────────────────────
@@ -389,6 +456,28 @@ async def put_workers(request: Request, runtime: SolverRuntime = Depends(get_run
     return {"config": cfg}
 
 
+# ── 运行时环境配置（前端 PUT {backend, runtime_id} 切换引擎）────────────
+@router.get("/api/settings/runtime-environment")
+async def get_runtime_environment(runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    return {"config": _aemeath_config(runtime)}
+
+
+@router.put("/api/settings/runtime-environment")
+async def put_runtime_environment(request: Request, runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    body = await _body(request)
+    cfg = _aemeath_config(runtime)
+    if isinstance(body, dict):
+        if body.get("backend"):
+            cfg["agent"]["engine_backend"] = str(body["backend"])
+        agent = body.get("agent") or {}
+        for k in ("worker_count", "race_scout", "race_timeout",
+                  "wall_clock_budget", "cost_budget_usd"):
+            if k in agent and agent[k] is not None:
+                cfg["agent"][k] = agent[k]
+    runtime.muteki_agent_config = cfg
+    return {"config": cfg}
+
+
 # ── 汇率（成本预算 CNY/USD 联动；在线获取 + 兜底 + 1h 缓存）──────────────
 _RATE_CACHE: dict[str, Any] = {"usd_cny": 7.2, "ts": 0.0}
 
@@ -436,6 +525,8 @@ async def _btw_stream(
     base_url = getattr(st, "bailian_base_url", "") or _DEFAULT_BAILIAN
     api_key = getattr(st, "bailian_api_key", "") or ""
     model = getattr(st, "orchestrator_main_model", "") or "qwen3.7-max"
+    # 网关完整端点（含 /llm-gateway/proxy/e/）不允许再拼 /chat/completions（用户规范）
+    endpoint = base_url if "/llm-gateway/proxy/e/" in base_url else f"{base_url}/chat/completions"
 
     sys_prompt = (
         "你是 Aemeath CTF 解题平台的旁路助手。结合给出的黑板上下文与题目，"
@@ -464,7 +555,7 @@ async def _btw_stream(
     try:
         async with httpx.AsyncClient(trust_env=False, timeout=120) as client:
             async with client.stream(
-                "POST", f"{base_url}/chat/completions", headers=headers, json=payload
+                "POST", endpoint, headers=headers, json=payload
             ) as resp:
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
@@ -482,6 +573,108 @@ async def _btw_stream(
     except Exception as e:  # noqa: BLE001
         yield f'data: {{"error": {json.dumps(str(e), ensure_ascii=False)}}}\n\n'
     yield 'data: {"done": true}\n\n'
+
+
+@router.post("/api/runs/{run_id}/explain")
+async def explain_run(
+    run_id: str,
+    request: Request,
+    manager: Any = Depends(_manager),
+    runtime: SolverRuntime = Depends(get_runtime),
+) -> Any:
+    """AI 解说员（SSE 流式）：把 run 最近的黑板 + 沙箱操作流翻译成
+    通俗中文：正在做什么 / 为什么 / 已发现线索 / 下一步猜想。
+
+    模型：模型池里第一个非 ocr 的 gateway-bailian（qwen3.7-flash 优先），
+    走网关完整端点（不拼 /chat/completions，用户规范）。"""
+    manager.ensure(run_id)
+    store = runtime.store
+    ctx = ""
+    try:
+        ctx = store.get_context(run_id) or ""
+    except Exception:  # noqa: BLE001
+        pass
+    ops_txt = ""
+    try:
+        recent = list(sandbox_registry.ops(run_id))[-12:]
+        if recent:
+            lines = []
+            for op in recent:
+                model = str(op.get("model") or "")
+                cmd = str(op.get("command") or op.get("cmd") or "")
+                head = str(op.get("stdout_head") or "")[:160].replace("\n", " ")
+                lines.append(f"- [{model}] {cmd}  →  {head}")
+            ops_txt = "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        pass
+
+    model = next(
+        (s.split("/", 1)[-1] for s in runtime.model_specs
+         if s.startswith("gateway-bailian/") and "ocr" not in s),
+        "qwen3.7-flash",
+    )
+    st = runtime.settings
+    base_url = getattr(st, "bailian_base_url", "") or _DEFAULT_BAILIAN
+    api_key = getattr(st, "bailian_api_key", "") or ""
+    endpoint = base_url if "/llm-gateway/proxy/e/" in base_url else f"{base_url}/chat/completions"
+
+    sys_prompt = (
+        "你是 CTF 解题过程的 AI 解说员。操作员（用户）看到的是 AI 求解器的"
+        "原始操作流与黑板数据，非常抽象。请用通俗易懂的中文解说当前状态："
+        "1) 求解器正在做什么（当前行动） 2) 为什么这样做（推测意图） "
+        "3) 已经发现了什么线索 4) 下一步可能的动作（猜想）。"
+        "输出简洁分点，3-6 条，不要复述原始日志。"
+    )
+    user = f"题目: {run_id}\n\n[黑板上下文]\n{ctx or '（暂无）'}"
+    if ops_txt:
+        user += f"\n\n[最近沙箱操作]\n{ops_txt}"
+
+    async def gen():
+        if not api_key:
+            for ch in "（未配置 LLM API Key，以下为黑板摘要）\n" + (ctx or "黑板暂无内容"):
+                yield f'data: {{"delta": {json.dumps(ch, ensure_ascii=False)}}}\n\n'
+            yield 'data: {"done": true}\n\n'
+            return
+        payload = {
+            "model": model,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user},
+            ],
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=120) as client:
+                async with client.stream(
+                    "POST", endpoint, headers=headers, json=payload
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(data)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        delta = (
+                            (obj.get("choices") or [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        if delta:
+                            yield f'data: {{"delta": {json.dumps(delta, ensure_ascii=False)}}}\n\n'
+        except Exception as e:  # noqa: BLE001
+            yield f'data: {{"error": {json.dumps(str(e), ensure_ascii=False)}}}\n\n'
+        yield 'data: {"done": true}\n\n'
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/api/runs/{run_id}/btw")
@@ -580,26 +773,56 @@ async def terminal(run_id: str, ws: WebSocket) -> None:
 
 @router.post("/api/runs/{run_id}/workers")
 async def spawn_worker(run_id: str, request: Request, manager: Any = Depends(_manager)) -> Any:
-    """给运行中的 run 增加一个求解 worker（Aemeath swarm 支持多 worker）。"""
+    """给运行中的 run 动态增加一条真实 solver lane（模型池扩容）。
+
+    body.engine = 模型 spec（如 gateway-bailian/qwen3.7-flash）。成功后
+    广播 WORKER_STATUS online 事件，前端 worker 面板实时反馈。"""
     body = await _body(request, allow_empty=True)
-    engine = str(body.get("engine") or "aemeath")
+    spec = str(body.get("engine") or "").strip()
+    if not spec:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "缺少 engine spec"})
+    try:
+        await manager.spawn_worker(run_id, spec)
+    except RuntimeError as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
     entry = manager.ensure(run_id)
     if entry.bridge is None:
         entry.bridge = EventBridge(entry.run_id)
-    me = entry.bridge._mk(WORKER_STATUS, {"status": "online", "engine": engine, "reason": "spawned"})
+    me = entry.bridge._mk(WORKER_STATUS, {"status": "online", "engine": spec, "reason": "spawned"})
     entry.history.append(me)
     for q in list(entry.subs):
         try:
             q.put_nowait(me)
         except asyncio.QueueFull:
             pass
-    return {"ok": True, "engine": engine, "run_id": run_id}
+    return {"ok": True, "engine": spec, "run_id": run_id}
 
 
 @router.delete("/api/runs/{run_id}/workers")
 async def kill_worker(run_id: str, request: Request, manager: Any = Depends(_manager)) -> Any:
+    """真实杀掉一条 solver lane（body.solver_id = 模型 spec）。
+
+    成功后广播 WORKER_STATUS offline 事件，前端 worker 面板实时反馈。"""
     body = await _body(request)
-    solver_id = str(body.get("solver_id") or "")
+    solver_id = str(body.get("solver_id") or "").strip()
+    if not solver_id:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "缺少 solver_id"})
+    try:
+        await manager.kill_worker(run_id, solver_id)
+    except RuntimeError as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+    entry = manager.ensure(run_id)
+    if entry.bridge is None:
+        entry.bridge = EventBridge(entry.run_id)
+    me = entry.bridge._mk(
+        WORKER_STATUS, {"status": "offline", "engine": solver_id, "reason": "killed by operator"}
+    )
+    entry.history.append(me)
+    for q in list(entry.subs):
+        try:
+            q.put_nowait(me)
+        except asyncio.QueueFull:
+            pass
     return {"ok": True, "solver_id": solver_id, "run_id": run_id}
 
 
@@ -622,6 +845,126 @@ async def worker_models(runtime: SolverRuntime = Depends(get_runtime)) -> Any:
             ],
         },
     }
+
+
+def _persist_model_specs(specs: list[str]) -> None:
+    """把模型池写回 config.yaml 的 models 行（保留行尾注释）。
+
+    单一数据源约定：config.yaml solver.models = 默认 Worker 配置的模型池，
+    前端 ModelsPanel 的增删最终都落到这里，重启后仍然生效。"""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    p = root / "config.yaml"
+    s = p.read_text(encoding="utf-8")
+    for line in s.splitlines():
+        if line.strip().startswith("models: "):
+            m = _re.match(r'^(\s*models: ")(.*)(")(.*)$', line)
+            if not m:
+                raise RuntimeError("config.yaml models 行格式不可解析")
+            new = f'{m.group(1)}{",".join(specs)}{m.group(3)}{m.group(4)}'
+            p.write_text(s.replace(line, new, 1), encoding="utf-8")
+            return
+    raise RuntimeError("config.yaml 无 models 行")
+
+
+async def _spawn_lane_on_active(engine: Any, spec: str) -> list[str]:
+    """给所有活跃 swarm 热插拔一条新 lane（模型池扩容时）。"""
+    spawned: list[str] = []
+    if engine is None:
+        return spawned
+    for pid, swarm in (getattr(engine, "_swarms", None) or {}).items():
+        if swarm.cancel_event.is_set():
+            continue
+        try:
+            if await swarm.spawn_solver(spec):
+                spawned.append(pid)
+        except Exception:  # noqa: BLE001
+            pass
+    return spawned
+
+
+async def _kill_lane_on_active(engine: Any, spec: str) -> list[str]:
+    """从所有活跃 swarm 移除一条 lane（模型池移除时）。"""
+    killed: list[str] = []
+    if engine is None:
+        return killed
+    for pid, swarm in (getattr(engine, "_swarms", None) or {}).items():
+        try:
+            if await swarm.kill_solver(spec):
+                killed.append(pid)
+        except Exception:  # noqa: BLE001
+            pass
+    return killed
+
+
+@router.post("/api/settings/worker-models")
+async def add_worker_model(request: Request, runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    """前端添加模型：校验 spec → 运行时模型池 + config.yaml 持久化 + 热插拔 lane。
+
+    校验（0x06 修复）：无 provider 前缀（不含 /）的 spec 自动补
+    gateway-bailian/（用户常直接粘贴模型名）；provider 必须存在且
+    API key 已配置——否则 solver 启动时 lane 立即 Unknown provider 死亡，
+    面板出现"暂无活动"的僵尸 worker。"""
+    body = await _body(request)
+    spec = str(body.get("spec") or "").strip()
+    if not spec:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "缺少 spec"})
+    normalized = spec
+    if "/" not in normalized:
+        normalized = f"gateway-bailian/{normalized}"
+    if normalized in runtime.model_specs:
+        return JSONResponse(status_code=400, content={"ok": False, "error": f"模型已存在: {normalized}"})
+    try:
+        from backend.models import _provider_ready
+        if not _provider_ready(normalized, runtime.settings):
+            provider = normalized.split("/", 1)[0]
+            raise ValueError(
+                f"provider {provider} 不可用（未知 provider 或未配置 API key）"
+            )
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"ok": False, "error": f"非法 spec: {e}"})
+    # 已知不可用模型（0x06 实测，避免反复踩坑；强试可改 config.yaml 绕过）。
+    # 只拦结构性不可用：思考模式关不掉 → tool_choice=required 冲突（确定性
+    # 400，无参数路径可解）。502/403/OCR 型不拦（网关瞬时/配额可能恢复，
+    # 用户可自行再试）。前缀匹配防变体名（如 qwen3.8-2.4t-a95b）。
+    model_name = normalized.split("/", 1)[-1].lower()
+    _KNOWN_UNUSABLE_PREFIXES = [
+        ("deepseek-v4-pro", "思考模式无法关闭（RE 只认 low..max），与强制工具调用冲突（实测 400）"),
+        ("deepseek-v4-flash-0731", "思考模式无法关闭（RE 只认 low..max），与强制工具调用冲突（实测 400）"),
+        ("qwen3.7-max-2026-05-17", "enable_thinking 限制 True，思考无法关闭（实测 400）"),
+        ("qwen3.7-max-preview", "enable_thinking 限制 True，思考无法关闭（实测 400）"),
+        ("qwen3.8-2.4t", "enable_thinking 限制 True，思考无法关闭（实测 400）"),
+    ]
+    reason = next((r for p, r in _KNOWN_UNUSABLE_PREFIXES if model_name.startswith(p)), "")
+    if reason:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": f"已知不可用：{reason}（{normalized}）"},
+        )
+    runtime.model_specs.append(normalized)
+    try:
+        _persist_model_specs(runtime.model_specs)
+    except Exception as e:  # noqa: BLE001
+        runtime.model_specs.remove(spec)
+        return JSONResponse(status_code=500, content={"ok": False, "error": f"持久化失败: {e}"})
+    spawned = await _spawn_lane_on_active(runtime.engine, normalized)
+    return {"ok": True, "spec": normalized, "spawned_on": spawned}
+
+
+@router.delete("/api/settings/worker-models/{spec:path}")
+async def remove_worker_model(spec: str, runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    """前端删除模型：杀掉活跃 lane → 运行时模型池移除 + config.yaml 持久化。"""
+    spec = spec.strip("/")
+    if spec not in runtime.model_specs:
+        return JSONResponse(status_code=400, content={"ok": False, "error": f"模型不在池中: {spec}"})
+    killed = await _kill_lane_on_active(runtime.engine, spec)
+    runtime.model_specs.remove(spec)
+    try:
+        _persist_model_specs(runtime.model_specs)
+    except Exception as e:  # noqa: BLE001
+        runtime.model_specs.append(spec)
+        return JSONResponse(status_code=500, content={"ok": False, "error": f"持久化失败: {e}"})
+    runtime.model_health.reset(spec)
+    return {"ok": True, "spec": spec, "killed_on": killed}
 
 
 @router.get("/api/settings/worker-model/health")
@@ -654,13 +997,37 @@ async def worker_image_pull() -> Any:
 
 
 @router.post("/api/settings/worker-model/test")
-async def worker_model_test(request: Request) -> Any:
+async def worker_model_test(request: Request,
+                            runtime: SolverRuntime = Depends(get_runtime)) -> Any:
+    """真实探测：给指定模型发一条极简消息，验证可用（配额/鉴权/网络/后缀）。"""
     body = await _body(request)
-    engine = "aemeath"
-    profile = body.get("profile")
-    if isinstance(profile, dict) and profile.get("engine"):
-        engine = str(profile["engine"])
-    return {"ok": True, "detail": "ok", "model": body.get("model", ""), "engine": engine}
+    spec = str(body.get("model") or body.get("spec") or "").strip()
+    st = runtime.settings
+    base = st.gateway_bailian_base_url or st.bailian_base_url or ""
+    key = st.bailian_api_key or ""
+    model = spec.split("/", 1)[1] if "/" in spec else spec
+    if not base or not key:
+        return {"ok": False, "detail": "网关未配置（.env 缺 BAILIAN_BASE_URL / API_KEY）",
+                "model": model, "spec": spec}
+    url = base if "/llm-gateway/proxy/e/" in base else f"{base}/chat/completions"
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=25) as client:
+            r = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                json={"model": model, "max_tokens": 8,
+                      "messages": [{"role": "user", "content": "ping"}]},
+            )
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            data = {}
+        detail = str(data.get("error") or data.get("message") or "ok")[:200]
+        return {"ok": r.status_code == 200, "status": r.status_code,
+                "detail": detail, "model": model, "spec": spec}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)[:200], "model": model, "spec": spec}
 
 
 @router.get("/api/settings/profiles/health")

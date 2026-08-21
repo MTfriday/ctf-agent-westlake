@@ -44,12 +44,18 @@ class RunRecord:
     task: Optional[asyncio.Task] = None
     # 续传上下文：启动时注入的黑板上下文 + 操作员提示（断点续传关键）
     prompt: str = ""
+    # 非提交（本地）模式：不访问平台，用前端题面/附件本地构建题目求解
+    no_submit: bool = False
+    target: str = ""
+    attachments: list = field(default_factory=list)
+    category: str = ""
 
     def to_dict(self, log_tail: int = 50) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "problem_id": self.problem_id,
             "mode": self.mode,
+            "no_submit": self.no_submit,
             "status": self.status,
             "flag": self.flag,
             "error": self.error,
@@ -86,6 +92,8 @@ class EngineBackend(ABC):
         target: str = "",
         attachments: Optional[list[str]] = None,
         mode: str = "auto",
+        category: str = "",
+        no_submit: bool = False,
     ) -> str:
         """启动求解，返回 run_id。"""
 
@@ -124,6 +132,8 @@ class MockEngineBackend(EngineBackend):
         target: str = "",
         attachments: Optional[list[str]] = None,
         mode: str = "auto",
+        category: str = "",
+        no_submit: bool = False,
     ) -> str:
         run = self._new_run(problem_id, mode)
         run.status = "running"
@@ -185,9 +195,15 @@ class SwarmEngineBackend(EngineBackend):
         target: str = "",
         attachments: Optional[list[str]] = None,
         mode: str = "auto",
+        category: str = "",
+        no_submit: bool = False,
     ) -> str:
         run = self._new_run(problem_id, mode)
         run.prompt = prompt  # 保存黑板上下文 + 操作员提示，供 solver 续传使用
+        run.no_submit = no_submit
+        run.target = target
+        run.attachments = list(attachments or [])
+        run.category = category
         run.status = "running"
         await self.runtime.bus.publish(
             ev(EventType.RUN_STARTED, run_id=run.run_id, problem_id=problem_id, mode=mode)
@@ -201,26 +217,45 @@ class SwarmEngineBackend(EngineBackend):
             await self._emit(run, f"[swarm:{run.mode}] 启动真实求解引擎")
             platform = self.runtime.platform
 
-            # 1. 定位题目
-            challenges = await platform.fetch_all_challenges()
-            ch = next((c for c in challenges if c.get("name") == run.problem_id), None)
-            if ch is None:
-                raise RuntimeError(f"Challenge not found on platform: {run.problem_id}")
+            # 1. 定位题目：非提交（本地）模式直接由前端题面构建，平台模式走平台拉取
+            if run.no_submit:
+                await self._emit(run, "[swarm] 非提交模式：本地直解，不访问/不提交平台", "warn")
+                ch_dir = await self._build_local_challenge(run)
+            else:
+                # light 模式：list 定位目标题 + 只拉目标题 1 个详情补附件/靶机。
+                # 全量逐题详情 = 4 连发必中平台 429（p15），把启动降到 2 个请求。
+                challenges = await platform.fetch_all_challenges(light=True)
+                ch = next((c for c in challenges if c.get("name") == run.problem_id), None)
+                if ch is None:
+                    raise RuntimeError(f"Challenge not found on platform: {run.problem_id}")
 
-            # 1.5 动态容器题：connection_info 为空时尝试启动实例，拿到真实入口
-            if not str(ch.get("connection_info") or "").strip():
-                entry = await self._start_platform_env(ch)
-                if entry:
-                    ch["connection_info"] = entry
-                    await self._emit(run, f"已启动动态实例: {entry}", "success")
+                # 单题补详情（list 接口不含附件/靶机/描述）
+                try:
+                    detail = await platform.get_challenge_detail(ch["id"])
+                    ch = dict(ch)
+                    ch["description"] = str(getattr(detail, "description", "") or "")
+                    ch["value"] = getattr(detail, "value", 0) or 0
+                    ch["files"] = list(getattr(detail, "files", None) or [])
+                    ch["connection_info"] = str(getattr(detail, "connection_info", "") or "")
+                    ch["tags"] = list(getattr(detail, "tags", None) or [])
+                except Exception as e:  # noqa: BLE001
+                    await self._emit(run, f"题目详情拉取失败: {e}", "warn")
 
-            # 2. 拉取附件 + 元数据
+                # 1.5 动态容器题：connection_info 为空时尝试启动实例，拿到真实入口
+                if not str(ch.get("connection_info") or "").strip():
+                    entry = await self._start_platform_env(ch)
+                    if entry:
+                        ch["connection_info"] = entry
+                        await self._emit(run, f"已启动动态实例: {entry}", "success")
+
+                # 2. 拉取附件 + 元数据
+                ch_dir = await platform.pull_challenge(ch, self.runtime.challenges_root)
+
             from backend.prompts import ChallengeMeta
 
-            ch_dir = await platform.pull_challenge(ch, self.runtime.challenges_root)
             meta = ChallengeMeta.from_yaml(str(Path(ch_dir) / "metadata.yml"))
-            if not meta.connection_info and str(ch.get("connection_info") or "").strip():
-                meta.connection_info = str(ch["connection_info"]).strip()
+            if not meta.connection_info and run.target:
+                meta.connection_info = run.target.strip()
 
             # 3. 构建 ChallengeSwarm 并行求解，逐步过程经队列转发到前端
             from backend.agents.swarm import ChallengeSwarm
@@ -265,7 +300,7 @@ class SwarmEngineBackend(EngineBackend):
                 cost_tracker=self.runtime.cost_tracker,
                 settings=self.runtime.settings,
                 model_specs=active_specs,
-                no_submit=self.runtime.no_submit,
+                no_submit=(run.no_submit or self.runtime.no_submit),
                 trace_sink=_trace_sink,
                 # 断点续传：把黑板上下文 + 操作员提示作为额外系统提示喂给 solver，
                 # 让新启动的 solver 知道之前的发现 / 死路 / 操作员意图。
@@ -282,6 +317,10 @@ class SwarmEngineBackend(EngineBackend):
                         self._broadcast_blackboard(run, kind)
                     ))
                     if use_blackboard else None
+                ),
+                # lane 结束（finished/error/killed）→ ENGINE_LOG，前端日志可见
+                on_lane_finished=lambda spec, reason: asyncio.create_task(
+                    self._emit(run, f"worker lane {spec} {reason}", "info")
                 ),
             )
             self._swarms[run.problem_id] = swarm
@@ -327,6 +366,38 @@ class SwarmEngineBackend(EngineBackend):
                     await trace_task
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
+
+    async def _build_local_challenge(self, run: RunRecord) -> str:
+        """非提交（本地）模式：用前端题面 + 上传附件构建本地题目目录。
+
+        与 CLI `--challenge <dir> --no-submit` 同构：写 metadata.yml +
+        distfiles/，完全不访问平台（没有 SLAB_ACCESS_KEY 也能求解）。
+        """
+        import shutil
+
+        import yaml
+
+        root = Path(self.runtime.challenges_root) / run.problem_id
+        dist = root / "distfiles"
+        dist.mkdir(parents=True, exist_ok=True)
+        for src in run.attachments:
+            srcp = Path(str(src))
+            if srcp.is_file():
+                shutil.copy2(srcp, dist / srcp.name)
+        meta = {
+            "name": run.problem_id,
+            "category": run.category or "misc",
+            "value": 100,
+            "description": run.prompt or "(无题面描述——请检查前端输入)",
+        }
+        if run.target:
+            meta["connection_info"] = run.target
+        (root / "metadata.yml").write_text(
+            yaml.safe_dump(meta, allow_unicode=True), encoding="utf-8"
+        )
+        await self._emit(run, f"本地题目已构建: {root}（附件 {len(run.attachments)} 个）")
+        return str(root)
+
 
     async def _start_platform_env(self, ch: dict[str, Any]) -> str:
         """尝试为动态容器题获取实例入口（host:port / URL）。
@@ -395,6 +466,27 @@ class SwarmEngineBackend(EngineBackend):
             self._swarms[run.problem_id].kill()
         return await super().stop(run_id)
 
+    async def spawn_worker(self, problem_id: str, spec: str) -> None:
+        """给活跃 swarm 动态增加一条 solver lane（模型池扩容）。"""
+        swarm = self._swarms.get(problem_id)
+        if swarm is None:
+            raise RuntimeError(f"no active swarm for {problem_id!r}")
+        if swarm.cancel_event.is_set():
+            raise RuntimeError(f"swarm for {problem_id!r} already finished")
+        if not await swarm.spawn_solver(spec):
+            raise RuntimeError(f"solver lane already active: {spec}")
+        run = next((r for r in self.runs.values() if r.problem_id == problem_id), None)
+        if run is not None:
+            await self._emit(run, f"worker lane spawned: {spec}")
+
+    async def kill_worker(self, problem_id: str, spec: str) -> None:
+        """取消活跃 swarm 的一条 solver lane（worker 杀进程）。"""
+        swarm = self._swarms.get(problem_id)
+        if swarm is None:
+            raise RuntimeError(f"no active swarm for {problem_id!r}")
+        if not await swarm.kill_solver(spec):
+            raise RuntimeError(f"solver lane not active: {spec}")
+
 
 class HybridEngineBackend(SwarmEngineBackend):
     """混合引擎 — 竞速 swarm + 总控 OODA 编排（黑板驱动的 hybrid 模式）。
@@ -419,17 +511,29 @@ class HybridEngineBackend(SwarmEngineBackend):
         target: str = "",
         attachments: Optional[list[str]] = None,
         mode: str = "auto",
+        category: str = "",
+        no_submit: bool = False,
     ) -> str:
         run = self._new_run(problem_id, mode)
         run.prompt = prompt
+        run.no_submit = no_submit
+        run.target = target
+        run.attachments = list(attachments or [])
+        run.category = category
         run.status = "running"
         await self.runtime.bus.publish(
             ev(EventType.RUN_STARTED, run_id=run.run_id, problem_id=problem_id, mode=mode)
         )
         # 后台任务：solver 竞速 + OODA 编排协同推进
-        run.task = asyncio.create_task(
-            self._run_hybrid(run), name=f"hybrid-{run.run_id}"
-        )
+        if no_submit:
+            # 非提交模式：OODA 编排依赖平台题目源，退化为本地 swarm 直解
+            run.task = asyncio.create_task(
+                self._run_swarm(run, use_blackboard=True), name=f"hybrid-{run.run_id}"
+            )
+        else:
+            run.task = asyncio.create_task(
+                self._run_hybrid(run), name=f"hybrid-{run.run_id}"
+            )
         return run.run_id
 
     async def _run_hybrid(self, run: RunRecord) -> None:

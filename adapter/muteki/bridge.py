@@ -130,17 +130,17 @@ class EventBridge:
             if kind == "tool_call":
                 out.append(self._mk(TOOL_START, {
                     "tool": p.get("tool", "?"),
-                    "args": str(p.get("args", ""))[:500],
+                    "args": str(p.get("args", ""))[:12000],
                 }, solver_id=solver or None))
                 if p.get("args"):
                     out.append(self._mk(TOOL_CALL_ARGS, {
                         "tool": p.get("tool", "?"),
-                        "args": str(p.get("args", "")),
+                        "args": str(p.get("args", ""))[:12000],
                     }, solver_id=solver or None))
             elif kind == "tool_result":
                 out.append(self._mk(TOOL_RESULT, {
                     "tool": p.get("tool", "?"),
-                    "result": str(p.get("result", ""))[:2000],
+                    "result": str(p.get("result", ""))[:12000],
                 }, solver_id=solver or None))
             else:
                 text = str(p.get("message") or p.get("text") or "")

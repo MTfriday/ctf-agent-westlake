@@ -17,6 +17,9 @@ import logging
 import time
 import uuid
 from collections import deque
+from urllib.parse import urlparse
+
+import httpx
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -31,8 +34,15 @@ from adapter.muteki.bridge import (
 
 logger = logging.getLogger(__name__)
 
+# auto-solve 跳过集：用户已放弃的题（提交次数用尽等）不自动重跑，白烧额度
+_AUTO_SOLVE_SKIP: set[str] = {"解压缩"}
+
 # 单 run 环形历史容量（Last-Event-ID 续传窗口）
 _HISTORY_LEN = 600
+
+
+class PlatformChallengeMissing(RuntimeError):
+    """题目在平台上找不到（平台不可达/题目不存在）——区别于"已解出"拒绝。"""
 
 
 @dataclass
@@ -46,6 +56,8 @@ class RunEntry:
     finished: bool = False
     solved: bool = False
     paused: bool = False
+    # 操作员手动停止（hitl stop）：禁止 auto-solve 断点续传自动拉起，直到 resume
+    manual_stopped: bool = False
     status: str = "draft"  # draft|running|paused|solved|finished|failed
     flag: Optional[str] = None
     error: Optional[str] = None
@@ -59,6 +71,8 @@ class RunEntry:
     # 内部：Aemeath 侧信息
     engine_run_id: Optional[str] = None
     prompt: str = ""
+    # 非提交（本地）模式：不访问平台、不提交 flag，仅本地求解并回显网页
+    no_submit: bool = False
     # 每 run 的桥 + SSE 缓冲
     bridge: Optional[EventBridge] = None
     history: deque = field(default_factory=lambda: deque(maxlen=_HISTORY_LEN))
@@ -83,6 +97,7 @@ class RunEntry:
             "order": self.order,
             "updated": self.updated,
             "updated_at": self.updated,
+            "no_submit": self.no_submit,
         }
 
     def meta(self) -> dict[str, Any]:
@@ -91,6 +106,7 @@ class RunEntry:
             "name": self.name, "category": self.category, "value": self.value,
             "solved": self.solved, "status": self.status,
             "prompt": self.prompt,
+            "no_submit": self.no_submit,
             "flag": self.flag, "error": self.error,
             "pinned": self.pinned, "pinned_at": self.pinned_at,
             "archived": self.archived, "folder_id": self.folder_id, "order": self.order,
@@ -98,7 +114,7 @@ class RunEntry:
 
     def apply_meta(self, meta: dict[str, Any]) -> None:
         for k in ("name", "category", "value", "solved", "status", "prompt",
-                  "flag", "error",
+                  "flag", "error", "no_submit",
                   "pinned", "pinned_at", "archived", "folder_id", "order"):
             if k in meta:
                 setattr(self, k, meta[k])
@@ -128,6 +144,9 @@ class RunManager:
         self._auto_task: Optional[asyncio.Task] = None
         # 用户删除的 run_id（防止全自动 seed 把平台上的题重新注册/重新求解）
         self._deleted: set[str] = set()
+        # 平台题目名白名单（seed 时收集）：auto-solve 只自动求解平台题，
+        # 不碰前端自建的 run-XXXX 草稿
+        self._platform_names: set[str] = set()
         self._load_meta()
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
@@ -170,12 +189,30 @@ class RunManager:
         串行逐个启动，避免同时拉爆资源；一轮内全部启动后等待下个周期。
         """
         interval = float(getattr(self.runtime.settings, "adapter_auto_poll_interval", 20.0) or 20.0)
+        cycle = 0
         try:
             while True:
                 try:
-                    # 定期重拉平台题目：发现新题自动预注册 + 检测已解出
-                    await self._seed_challenges()
+                    # 平台 429 冷却期内整轮跳过：不测窗口、不重启 run、不强刷 seed，
+                    # 让限流窗口自然关闭（否则每 20s 的重试/10 分钟强刷会不断延长窗口）
+                    plat_cooldown = getattr(
+                        self.runtime.platform, "in_cooldown", lambda: False
+                    )()
+                    if plat_cooldown:
+                        await asyncio.sleep(interval)
+                        continue
+                    # 定期重拉平台题目：发现新题自动预注册 + 检测已解出。
+                    # _seeded 守卫使普通 seed 恒为 no-op；每 30 轮（~10 分钟）
+                    # force 强刷一次，平台 429 恢复后错误标记自愈、新题可被发现。
+                    cycle += 1
+                    await self._seed_challenges(force=(cycle % 30 == 0))
                     for entry in sorted(self._runs.values(), key=lambda r: r.order):
+                        # 只自动求解平台题目；前端自建 run（run-XXXX）一律跳过
+                        if entry.run_id not in self._platform_names:
+                            continue
+                        # 用户已放弃的题（提交次数用尽）不自动重跑
+                        if entry.run_id in _AUTO_SOLVE_SKIP:
+                            continue
                         if entry.solved:
                             continue
                         # adapter 重启后：引擎已丢失的"running" run → 视为中断，从黑板续跑
@@ -196,12 +233,22 @@ class RunManager:
                                                        "category": entry.category}},
                                     )
                                 except RuntimeError as e:
+                                    if isinstance(e, PlatformChallengeMissing):
+                                        entry.error = "platform_missing:" + str(e)
                                     logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
                                 except Exception as e:  # noqa: BLE001
                                     logger.warning("auto-resume %s failed: %s", entry.run_id, e)
                             continue
                         # 断点续传：上次失败/停止 且 黑板留有上下文 → 自动续跑
-                        if entry.started and entry.finished and entry.status in ("failed", "stopped"):
+                        # （操作员手动 stop 过的题不自动拉起）
+                        if (entry.started and entry.finished and not entry.manual_stopped
+                                and entry.status in ("failed", "stopped")):
+                            # 平台不可达/题目不存在时不再反复续跑（seed 成功后清空 error 再恢复）
+                            if entry.error and (
+                                "platform_missing" in entry.error
+                                or "not found on platform" in entry.error
+                            ):
+                                continue
                             has_ctx = self._has_blackboard_ctx(entry.run_id)
                             if has_ctx:
                                 logger.info(
@@ -215,11 +262,19 @@ class RunManager:
                                                        "category": entry.category}},
                                     )
                                 except RuntimeError as e:
+                                    if isinstance(e, PlatformChallengeMissing):
+                                        entry.error = "platform_missing:" + str(e)
                                     logger.warning("auto-resume %s skipped: %s", entry.run_id, e)
                                 except Exception as e:  # noqa: BLE001
                                     logger.warning("auto-resume %s failed: %s", entry.run_id, e)
                             continue
                         if entry.started:
+                            continue
+                        # 平台不可达时不再反复尝试启动（seed 成功后清空 error 再恢复）
+                        if entry.error and (
+                            "platform_missing" in entry.error
+                            or "not found on platform" in entry.error
+                        ):
                             continue
                         # 已解出但运行中结束、或从未启动 → 自动启动求解
                         logger.info("auto-solve: starting %r (unsolved)", entry.run_id)
@@ -231,14 +286,39 @@ class RunManager:
                                                "category": entry.category}},
                             )
                         except RuntimeError as e:
-                            # 已解出等拒绝原因——标记并继续
-                            logger.warning("auto-solve %s skipped: %s", entry.run_id, e)
-                            entry.solved = True
-                            entry.status = "solved"
+                            # start() 的"已解出"拒绝已被上方 entry.solved 过滤；此处的
+                            # RuntimeError 只可能是启动失败（平台不可达等）——不能误标为已解出。
+                            if isinstance(e, PlatformChallengeMissing):
+                                entry.error = "platform_missing:" + str(e)
+                            else:
+                                entry.error = str(e)
+                            logger.warning("auto-solve %s failed: %s", entry.run_id, e)
                         except Exception as e:  # noqa: BLE001
                             logger.warning("auto-solve %s failed: %s", entry.run_id, e)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("auto-solve cycle error: %s", e)
+                # 清理遗留的"running"死状态：重启后引擎已丢失、且本周期未被
+                # 重启的 run（跳过集/非平台题等不会被 auto-solve 重启），状态
+                # 永远停在"运行中"→ 左侧列表误导 + 沙箱面板无容器。标 stopped
+                # 恢复真实状态；平台题有黑板上下文时仍会走"断点续传"路径重启。
+                changed = False
+                for entry in list(self._runs.values()):
+                    if not (entry.started and not entry.finished):
+                        continue
+                    alive = False
+                    if entry.engine_run_id and self.runtime.engine is not None:
+                        alive = entry.engine_run_id in (self.runtime.engine.runs or {})
+                    if not alive:
+                        logger.info(
+                            "auto-solve: stale running %r -> stopped (engine lost, not relaunched)",
+                            entry.run_id,
+                        )
+                        entry.finished = True
+                        entry.status = "stopped"
+                        entry.error = "interrupted by adapter restart"
+                        changed = True
+                if changed:
+                    self._save_meta()
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             logger.info("auto-solve loop stopped")
@@ -252,12 +332,14 @@ class RunManager:
             return False
 
     # ── challenge 预注册 ─────────────────────────────────────────────────
-    async def _seed_challenges(self) -> None:
-        if self._seeded:
+    async def _seed_challenges(self, force: bool = False) -> None:
+        if self._seeded and not force:
             return
         self._seeded = True
         try:
-            challenges = await self.runtime.platform.fetch_all_challenges()
+            # light 模式：seed 只需要 name/solved，不逐题拉详情
+            # （p15：全量详情 4 连发必中平台 429 → 300s 冷却 → auto-solve 锁死）
+            challenges = await self.runtime.platform.fetch_all_challenges(light=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("seed challenges failed: %s", e)
             return
@@ -265,6 +347,19 @@ class RunManager:
             name = str(ch.get("name") or "").strip()
             if not name:
                 continue
+            self._platform_names.add(name)
+            existing = self._runs.get(name)
+            if existing is not None:
+                # 平台恢复可达 → 清除 platform_missing/not-found 标记（必须先于
+                # _deleted 检查：已删除题的错误标记若残留，auto-solve 的 error
+                # 拦截会永久跳过该题，平台列表也无法手动重启；_deleted 只阻止
+                # 重新注册新条目，不影响已有条目的自愈）
+                if existing.error and (
+                    "platform_missing" in existing.error
+                    or "not found on platform" in existing.error
+                ):
+                    existing.error = ""
+                    logger.info("cleared stale platform error for %r", name)
             # 用户已删除的题：不重新注册（防止自动复活）
             if name in self._deleted:
                 continue
@@ -272,7 +367,6 @@ class RunManager:
             already_solved = bool(ch.get("solved") or ch.get("solved_by_me") or False)
             desc = str(ch.get("description") or "").strip()
             value = ch.get("value")
-            existing = self._runs.get(name)
             if existing is not None:
                 # 已有 run：补齐 solved/描述（若之前未保存），并确保有开场事件
                 if already_solved and not existing.solved:
@@ -333,7 +427,16 @@ class RunManager:
             self._runs[run_id] = entry
         return entry
 
-    def create(self) -> RunEntry:
+    def create(self, name: str = "") -> RunEntry:
+        """创建 run：给名字则用名字作 run_id（解题模式/平台题同名），否则随机 run-XXXX。"""
+        name = str(name or "").strip()[:80]
+        if name:
+            if name in self._runs:
+                return self._runs[name]
+            entry = RunEntry(run_id=name, name=name, order=self._next_order())
+            self._runs[name] = entry
+            self._save_meta()
+            return entry
         run_id = f"run-{uuid.uuid4().hex[:8]}"
         entry = RunEntry(run_id=run_id, order=self._next_order())
         self._runs[run_id] = entry
@@ -441,7 +544,14 @@ class RunManager:
 
     # ── start / 引擎桥接 ─────────────────────────────────────────────────
     async def start(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        """启动一个 run：翻译 muteki 启动体 → Aemeath launch_solver。"""
+        """启动一个 run：翻译 muteki 启动体 → Aemeath launch_solver。
+
+        0x03 双模式：
+          - 比赛模式（默认 / mode=competition）：problem_id 必须是平台题目名；
+            run-XXXX 草稿启动时若带平台题目名，自动迁移 run_id（修复网页端秒失败）。
+          - 解题模式（mode=manual / no_submit=true）：本地构建题目 + 下载附件，
+            不访问平台、不提交 flag，解出的 flag 只回显网页。
+        """
         entry = self.ensure(run_id)
         # 平台已解出的题拒绝再次启动（避免浪费 token 重复求解）
         if entry.solved:
@@ -452,22 +562,66 @@ class RunManager:
         if ch.get("category"):
             entry.category = str(ch["category"])
         entry.prompt = str(body.get("prompt") or ch.get("description") or "")
-        problem_id = entry.run_id  # 预注册 run → run_id 即 challenge name
+        # 非提交模式开关：body 里显式带 no_submit 才更新，之后按 run 粘住
+        # （auto-solve 续跑 / resolve 不传时保持原值）
+        if body.get("no_submit") is not None:
+            entry.no_submit = bool(body.get("no_submit"))
 
         mode = str(body.get("mode") or body.get("kind") or "swarm")
+        ch_name = str(ch.get("name") or "").strip()
+        is_platform = bool(ch_name) and ch_name in self._platform_names
+        if body.get("no_submit") or mode in ("manual", "local"):
+            # 解题模式：本地直解（不访问/不提交平台）
+            entry.no_submit = True
+            mode = "swarm"
+        elif is_platform and entry.run_id != ch_name:
+            # 比赛模式：run-XXXX 草稿 → 迁移为平台题目名（rail 已有同名 run 则复用）
+            if ch_name in self._runs:
+                entry = self._runs[ch_name]
+                entry.prompt = str(body.get("prompt") or ch.get("description") or entry.prompt)
+            else:
+                self._runs.pop(run_id, None)
+                entry.run_id = ch_name
+                self._runs[ch_name] = entry
+        problem_id = entry.run_id
+
+        # 解题模式附件：body.challenge.attachments = [{name?, url?} | {path} | "url"]
+        attach_paths: list[str] = []
+        if entry.no_submit:
+            for a in (ch.get("attachments") or []):
+                if isinstance(a, str):
+                    # 网页端直接把附件路径当字符串传 → 非 URL 视为本地绝对路径（0x02）
+                    a = {"url": a} if a.startswith(("http://", "https://")) else {"path": a}
+                if not isinstance(a, dict):
+                    continue
+                p = str(a.get("path") or "")
+                url = str(a.get("url") or "")
+                if p and Path(p).is_file():
+                    attach_paths.append(p)
+                elif url.startswith(("http://", "https://")):
+                    dest = await self._download_attachment(problem_id, url)
+                    if dest:
+                        attach_paths.append(dest)
+
         if mode not in ("swarm", "orchestrated", "hybrid", "auto"):
             mode = "auto"
+        if entry.no_submit:
+            mode = "swarm"
 
         try:
             res = await self.runtime.launch_solver(
                 problem_id,
                 prompt=entry.prompt,
                 target=str(ch.get("target") or ""),
-                attachments=list(ch.get("attachments") or []) or None,
+                attachments=attach_paths or None,
+                category=entry.category,
                 mode=mode,
+                no_submit=entry.no_submit,
             )
         except KeyError as e:
-            raise RuntimeError(f"平台未找到题目 {problem_id!r}，请从左侧题目列表选择。({e})")
+            raise PlatformChallengeMissing(
+                f"平台未找到题目 {problem_id!r}，请从左侧题目列表选择。({e})"
+            ) from e
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"启动失败: {e}")
 
@@ -479,7 +633,63 @@ class RunManager:
         entry.status = "running"
         entry.updated = time.time()
         self._save_meta()
-        return {"run_id": run_id, "ok": True, "engine_run_id": entry.engine_run_id}
+        return {"run_id": problem_id, "ok": True, "engine_run_id": entry.engine_run_id,
+                "mode": "manual" if entry.no_submit else "competition"}
+
+    async def _download_attachment(self, problem_id: str, url: str) -> str | None:
+        """解题模式：把附件 URL 下载到 challenges/{problem_id}/distfiles/。
+
+        平台资源（pro-resource.dasctf.com）需要 X-Agent-AccessKey 头——先裸请求，
+        403 时带 AccessKey 重试；其余 URL 裸请求即可。
+        """
+        try:
+            dest_dir = Path(self.runtime.challenges_root) / problem_id / "distfiles"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            name = Path(urlparse(url).path).name or f"attachment_{int(time.time())}"
+            dest = dest_dir / name
+            async with httpx.AsyncClient(trust_env=False, timeout=120,
+                                         follow_redirects=True) as client:
+                # 传输层/DNS 瞬断重试 3 次（VM DNS 间歇性失败，实测会抽风）
+                resp = None
+                last_exc: Exception | None = None
+                for attempt in range(3):
+                    try:
+                        resp = await client.get(url)
+                        break
+                    except (httpx.TransportError, OSError) as e:  # noqa: BLE001
+                        last_exc = e
+                        logger.warning("attachment download attempt %d/3 failed %s: %s",
+                                       attempt + 1, url, e)
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                if resp is None:
+                    raise RuntimeError(f"attachment download failed after 3 attempts: {last_exc}")
+                if resp.status_code in (401, 403):
+                    ak = getattr(self.runtime.settings, "slab_access_key", "") or ""
+                    if ak:
+                        resp = await client.get(url, headers={"X-Agent-AccessKey": ak})
+                if resp.status_code != 200:
+                    logger.warning("attachment download failed %s: HTTP %d",
+                                   url, resp.status_code)
+                    return None
+                dest.write_bytes(resp.content)
+            logger.info("attachment downloaded: %s (%d bytes)", dest, dest.stat().st_size)
+            return str(dest)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("attachment download error %s: %s", url, e)
+            return None
+
+    async def sync_challenges(self) -> dict[str, Any]:
+        """强制重新拉取平台题目（网页端「同步题目」按钮）。"""
+        before = set(self._runs.keys())
+        self._seeded = False
+        await self._seed_challenges(force=True)
+        after = set(self._runs.keys())
+        return {
+            "ok": True,
+            "total": len(self._runs),
+            "added": sorted(after - before),
+            "unsolved": [r.run_id for r in self._runs.values() if not r.solved],
+        }
 
     # ── 事件同步循环 ─────────────────────────────────────────────────────
     async def _sync_loop(self) -> None:
@@ -573,6 +783,7 @@ class RunManager:
             entry.status = "paused"
             self._guidance(entry, "操作员暂停了求解（引擎已停止，黑板上下文已保存）")
         elif action == "resume":
+            entry.manual_stopped = False
             entry.paused = False
             entry.status = "running"
             # 真恢复：若引擎已被停止（finished），从黑板续跑重新启动
@@ -588,6 +799,18 @@ class RunManager:
                     self._guidance(entry, f"续跑启动失败: {e}")
             else:
                 self._guidance(entry, "操作员恢复求解")
+        elif action == "stop":
+            # 真停止：停引擎（与 pause 不同——终结，不自动续跑）。
+            # 前端「停止解题」按钮走这里；删除 run（DELETE）是另一条用户认可的路径。
+            if entry.engine_run_id:
+                try:
+                    await self.runtime.stop_engine(entry.engine_run_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("stop engine failed: %s", e)
+            entry.finished = True
+            entry.status = "stopped"
+            entry.manual_stopped = True
+            self._guidance(entry, "操作员停止了求解（引擎已停止，黑板上下文已保存）")
         elif action == "mark_false":
             flag = str(body.get("flag") or text)
             if flag:
@@ -610,6 +833,47 @@ class RunManager:
         entry.updated = time.time()
         self._save_meta()
         return {"ok": True, "run_id": run_id}
+
+    # ── worker 增删（前端「worker 面板」实时控制）────────────────────────
+    async def spawn_worker(self, run_id: str, spec: str) -> None:
+        """给活跃 swarm 动态增加一条 solver lane（模型池扩容）。"""
+        entry = self.ensure(run_id)
+        engine = self.runtime.engine
+        if engine is None:
+            raise RuntimeError("引擎不可用")
+        if not (entry.started and not entry.finished):
+            raise RuntimeError("run 不在运行中")
+        swarm = self._get_active_swarm(engine, entry.run_id)
+        if not await swarm.spawn_solver(spec):
+            raise RuntimeError(f"solver lane 已存在: {spec}")
+        if spec not in self.runtime.model_specs:
+            self.runtime.model_specs.append(spec)
+        logger.info("spawned worker lane %s on %r", spec, run_id)
+
+    async def kill_worker(self, run_id: str, spec: str) -> None:
+        """取消一条 solver lane（worker 杀进程）。
+
+        幂等删除（0x06）：run 已结束/无活跃 swarm、或 lane 早已消亡时视为
+        删除成功——用户对已结束 run 的 worker 面板点删除不应报错，只有
+        run 本身不存在/引擎不可用才算失败。"""
+        entry = self.ensure(run_id)
+        engine = self.runtime.engine
+        if engine is None:
+            raise RuntimeError("引擎不可用")
+        swarm = (getattr(engine, "_swarms", None) or {}).get(entry.run_id)
+        if swarm is not None and not swarm.cancel_event.is_set():
+            await swarm.kill_solver(spec)
+        logger.info("killed worker lane %s on %r (idempotent)", spec, run_id)
+
+    @staticmethod
+    def _get_active_swarm(engine: Any, problem_id: str) -> Any:
+        swarms = getattr(engine, "_swarms", None) or {}
+        swarm = swarms.get(problem_id)
+        if swarm is None:
+            raise RuntimeError(f"swarm 不存在: {problem_id}")
+        if swarm.cancel_event.is_set():
+            raise RuntimeError(f"swarm 已结束: {problem_id}")
+        return swarm
 
     def _guidance(self, entry: RunEntry, text: str) -> None:
         """发布 coordinator.guidance 事件（前端聊天气泡可见）。"""

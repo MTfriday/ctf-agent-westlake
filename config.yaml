@@ -54,7 +54,8 @@ solver:
   # 没有 claude/codex CLI 时会自动回退到 OpenAI 兼容 API
   # 示例: "deepseek/deepseek-v4-flash,deepseek/deepseek-v4-pro"
   # 当前: deepseek 主打 + 百炼多模型并行竞速（qwen3.8-max 强推理 / qwen3.7-plus 均衡 / qwen3.7-flash 快速）
-  models: "gateway/deepseek-v4-flash,gateway-bailian/qwen3.7-flash,gateway-bailian/qwen3.7-plus,gateway-bailian/qwen3.8-max"
+  models: "gateway-bailian/qwen3.8-max,gateway-bailian/qwen3.7-flash"  # free-tier pool round6 (2026-08-18: 用户删除 qwen3.5-ocr——OCR 模型不适合解题; 此前误入 3 个无前缀 spec 已清; 其余同 round5 注释: 移除 403 配额耗尽 kimi-k2.7-code/qwen3.7-plus-2026-05-26/qwen3.7-max-2026-05-20; 思考模式 tool_choice=required 400 去掉 max-2026-05-17/max-preview/deepseek-v4-flash-0731; qwen3.8-2.4t 502 去掉)
+  # models: "deepseek/deepseek-v4-flash,bailian/qwen3.7-flash,bailian/qwen3.7-plus,bailian/qwen3.8-max"  # direct (old)
 
   # Coordinator 后端: "claude" | "codex" | "pydantic" | "auto"
   # pydantic 可用任意 OpenAI 兼容模型（DeepSeek/百炼），无需 claude/codex CLI
@@ -79,6 +80,7 @@ rate_limit:
 
 # ========== 沙箱配置 ==========
 sandbox:
+  docker_url: "unix:///var/run/docker.sock"
   image: "ctf-sandbox"
   memory_limit: "16g"
   cpu_limit: 2                               # CPU 核心数
@@ -113,7 +115,7 @@ adapter:
 orchestrator:
   enabled: true
   # 主力规划模型（百炼 qwen；未配 BAILIAN_API_KEY 时自动回退规则）
-  main_model: "qwen3.8-max"
+  main_model: "qwen3.7-max-preview"
   # 模式路由模型
   router_model: "qwen3.7-flash"
   max_intents: 4                  # 每轮最多生成 Intent 数

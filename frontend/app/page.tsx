@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRun, useRunList, useFolders, newRun, patchRun, deleteRun, uploadFiles, spawnWorker, killWorker, openWorkspace, createFolder, renameFolder, deleteFolder, SavedFile } from "@/lib/useRun";
+import { syncPlatform } from "@/lib/useRun_add";
+import type { PlatformChallenge } from "@/lib/useRun_add";
 import { useT } from "@/lib/i18n";
 import { GraphNode, isRunActive } from "@/lib/events";
 import { I18nProvider } from "@/lib/i18n";
@@ -13,6 +15,9 @@ import { LoginGate } from "@/components/LoginGate";
 import { WorkerSettings } from "@/components/WorkerSettings";
 import { CommandPalette } from "@/components/CommandPalette";
 import { BtwPanel } from "@/components/BtwPanel";
+import { ManualLaunchForm } from "@/components/ManualLaunchForm";
+import { SandboxPanel } from "@/components/SandboxPanel";
+import { ChallengesModal } from "@/components/ChallengesModal";
 import { ToastLane, useToasts } from "@/components/Toast";
 import type { ArtifactView } from "@/components/ArtifactPanel";
 import { clampRailWidth, RAIL_WIDTH_DEFAULT, RAIL_WIDTH_STORAGE_KEY } from "@/lib/railSizing";
@@ -139,6 +144,30 @@ function Deck() {
   // dispatch() can put them on challenge.attachments. Lives at this level (not
   // in the Composer) so it survives into dispatch and resets on run switch.
   const [attachments, setAttachments] = useState<SavedFile[]>([]);
+  // ── 0x03/0x04 重构：模式切换 + 工具栏面板 ──────────────────────────
+  // 模式持久化到 localStorage（避免刷新丢失）；初始渲染用默认值，
+  // 挂载后 effect 再校正（同 theme 的写法，防 hydration 不匹配）。
+  const [mode, setMode] = useState<"competition" | "manual">("competition");
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("muteki.mode");
+      if (saved === "competition" || saved === "manual") setMode(saved);
+    } catch {
+      /* keep default */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("muteki.mode", mode);
+    } catch {
+      /* ok */
+    }
+  }, [mode]);
+  const [sandboxOpen, setSandboxOpen] = useState(false);
+  // 默认 Worker 配置面板的初始 tab（0x06 融合：工具条「模型」直达「模型池」tab）
+  const [settingsTab, setSettingsTab] = useState<"llm" | "agent" | "models">("llm");
+  const [challengesOpen, setChallengesOpen] = useState(false);
+  const [platformSyncing, setPlatformSyncing] = useState(false);
 
   const runs = useRunList(4000, listBump);
   const folders = useFolders(8000, listBump);
@@ -420,7 +449,8 @@ function Deck() {
     // attachments: absolute paths the backend saved; the worker stages them into
     // its cwd. Filtered server-side to existing paths, so a stale one is harmless.
     try {
-      await start({ kind: "swarm", prompt, offline, challenge, worker_backend, ...runOverrides }, id);
+      await start({ kind: "swarm", prompt, offline, challenge, worker_backend,
+        ...runOverrides }, id);
       setAttachments([]); // chips consumed by this dispatch
       setListBump((n) => n + 1);
     } catch (err) {
@@ -548,6 +578,52 @@ function Deck() {
   // reveal the run's workspace dir in the host file manager (real backend run only).
   const onOpenWorkspace = () => { if (runId && !isDraft(runId)) openWorkspace(runId); };
 
+  // 比赛模式「同步题目」：强制重拉平台列表并弹出题目选择。
+  const onSyncPlatform = async () => {
+    setPlatformSyncing(true);
+    try {
+      const r = await syncPlatform();
+      if (r?.ok) {
+        pushToast({ msg: `平台同步完成：共 ${r.total ?? 0} 题，新增 ${r.added?.length ?? 0} 题`, variant: "success" });
+      } else {
+        pushToast({ msg: "平台同步失败（后端不可达？）", variant: "error" });
+      }
+      setChallengesOpen(true);
+    } finally {
+      setPlatformSyncing(false);
+    }
+  };
+
+  // 比赛模式「开始解题」：直接以平台题目名作为 run 启动（problem_id=平台题名，
+  // 后端自动拉题、下载附件、求解并提交——0x03 比赛模式，同时修复 run-XXXX 秒失败）。
+  const onLaunchChallenge = async (ch: PlatformChallenge): Promise<boolean> => {
+    try {
+      await start({
+        kind: "swarm",
+        prompt: (ch.description || ch.name || "").toString(),
+        challenge: {
+          name: ch.name,
+          category: ch.category ?? "",
+          description: ch.description ?? "",
+          target: ch.connection_info ?? "",
+        },
+      }, ch.name);
+      setChallengesOpen(false);
+      setAttachments([]);
+      setRunId(ch.name);
+      setListBump((n) => n + 1);
+      pushToast({ msg: `已启动比赛题目：${ch.name}`, variant: "success" });
+      return true;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "";
+      pushToast({ msg: detail ? `启动失败：${detail}` : "启动失败", variant: "error" });
+      return false;
+    }
+  };
+
+  // 解题模式：草稿对话区直接渲染人工填写表单（替代聊天输入）。
+  const showManualLaunch = mode === "manual" && isDraft(runId);
+
   return (
     <div ref={shellRef} className="shell motion-root">
       <a href="#main-conversation" className="skip-link">{t("a11y.skipToMain")}</a>
@@ -566,6 +642,23 @@ function Deck() {
         onOpenSettings={() => setShowSettings(true)}
       />
       <main id="main-conversation" className="main motion-shell-piece" aria-label={t("a11y.main")}>
+        {showManualLaunch ? (
+          <ManualLaunchForm
+            onStart={start}
+            onStarted={(id) => {
+              setAttachments([]);
+              setRunId(id);
+              setListBump((n) => n + 1);
+              pushToast({ msg: "解题模式已启动", variant: "success" });
+            }}
+            onCancel={() => {
+              setArtifactOpen(false);
+              setSelected(null);
+              setAttachments([]);
+              setRunId(newDraftId());
+            }}
+          />
+        ) : (
         <Conversation
           deck={deck}
           running={running}
@@ -591,6 +684,7 @@ function Deck() {
           onHitlAnswered={() => pushToast({ msg: t("hitl.answered"), variant: "success" })}
           onOpenBtw={() => setBtwOpen(true)}
         />
+        )}
         <ArtifactPanel
           open={artifactOpen}
           width={artifactWidth}
@@ -612,7 +706,7 @@ function Deck() {
         />
       </main>
       <ToastLane toasts={toasts} onDismiss={dismissToast} />
-      <WorkerSettings open={showSettings} onClose={() => setShowSettings(false)} />
+      <WorkerSettings open={showSettings} onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -631,6 +725,46 @@ function Deck() {
         onClose={() => setBtwOpen(false)}
         runId={runId}
       />
+
+      {/* 0x03/0x04：顶部工具条 —— 模式切换 / 同步题目 / 沙箱 / 模型 */}
+      <div className="deck-toolbar">
+        <div className="dt-mode">
+          <button
+            className={mode === "competition" ? "on" : ""}
+            onClick={() => setMode("competition")}
+            title="比赛模式：自动获取平台题目、下载附件、自行解题并提交"
+          >
+            比赛模式
+          </button>
+          <button
+            className={mode === "manual" ? "on" : ""}
+            onClick={() => setMode("manual")}
+            title="解题模式：人工填写题目信息与附件，本地解题不提交"
+          >
+            解题模式
+          </button>
+        </div>
+        {mode === "competition" && (
+          <button className="dt-btn" onClick={onSyncPlatform} disabled={platformSyncing}>
+            {platformSyncing ? "同步中…" : "同步题目"}
+          </button>
+        )}
+        <button className="dt-btn" onClick={() => setChallengesOpen(true)}>题目列表</button>
+        <button className={`dt-btn ${sandboxOpen ? "on" : ""}`} onClick={() => setSandboxOpen((v) => !v)}>
+          沙箱
+        </button>
+        <button className="dt-btn" onClick={() => { setSettingsTab("models"); setShowSettings(true); }}>模型</button>
+      </div>
+
+      {/* 0x01：透明化沙箱抽屉（操作流 + 文件结构） */}
+      <SandboxPanel
+        runId={runId}
+        active={running}
+        open={sandboxOpen}
+        onToggle={() => setSandboxOpen((v) => !v)}
+      />
+      {/* 0x03：比赛模式平台题目选择 */}
+      <ChallengesModal open={challengesOpen} onClose={() => setChallengesOpen(false)} onLaunch={onLaunchChallenge} />
     </div>
   );
 }

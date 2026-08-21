@@ -159,7 +159,20 @@ class OrchestratorScheduler:
         self.current_cycle += 1
         # ── Observe ──
         stats = self.store.get_stats(self.problem_id)
-        challenge = await self._get_challenge(self.problem_id) if self._get_challenge else None
+        challenge = None
+        if self._get_challenge:
+            try:
+                challenge = await self._get_challenge(self.problem_id)
+            except KeyError as e:
+                logger.warning(
+                    "ooda %s: challenge not found on platform: %s", self.problem_id, e
+                )
+                self.status = "stopped"
+                await self.bus.publish(
+                    ev(EventType.RUN_STATUS, problem_id=self.problem_id,
+                       status="failed", error=str(e))
+                )
+                return {"cycle": self.current_cycle, "status": "failed"}
         if challenge and challenge.get("solved"):
             self.status = "solved"
             await self.bus.publish(

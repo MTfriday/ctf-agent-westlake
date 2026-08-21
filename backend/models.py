@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import boto3
-import httpx
 from pydantic_ai.models import Model
 from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
@@ -15,28 +14,11 @@ from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
+from backend.llm_net import get_shared_gateway_client, get_shared_http_client
+
 if TYPE_CHECKING:
     from backend.config import Settings
 
-
-class _TrimCompletionsTransport(httpx.AsyncBaseTransport):
-    """去掉 openai SDK 自动拼的 `/chat/completions`，把请求转发到完整网关端点。
-
-    西湖论剑 llm-gateway 代理给出的 base_url 本身就是完整的 Chat Completions
-    端点（POST 到该 URL 即完成对话），openai SDK 却会在其后拼接 `/chat/completions`
-    （`.../e/TOKEN/chat/completions` → 404）。此 transport 在转发前把拼接的路径段
-    去掉，使请求命中正确的代理端点。
-    """
-
-    def __init__(self) -> None:
-        self._transport = httpx.AsyncHTTPTransport()
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/chat/completions"):
-            request.url = request.url.copy_with(
-                path=request.url.path[: -len("/chat/completions")]
-            )
-        return await self._transport.handle_async_request(request)
 
 # Default model specs — claude-sdk and codex providers use the new solver backends
 DEFAULT_MODELS: list[str] = [
@@ -191,7 +173,7 @@ def _build_gateway_model(model_id: str, base_url: str, api_key: str) -> OpenAICh
         provider=OpenAIProvider(
             base_url=base_url,
             api_key=api_key,
-            http_client=httpx.AsyncClient(transport=_TrimCompletionsTransport()),
+            http_client=get_shared_gateway_client(),
         ),
     )
 
@@ -223,6 +205,7 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                 provider=OpenAIProvider(
                     base_url=settings.azure_openai_endpoint,
                     api_key=settings.azure_openai_api_key,
+                    http_client=get_shared_http_client(),
                 ),
             )
         case "zen":
@@ -231,6 +214,7 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                 provider=OpenAIProvider(
                     base_url="https://opencode.ai/zen/v1",
                     api_key=settings.opencode_zen_api_key,
+                    http_client=get_shared_http_client(),
                 ),
             )
         case "deepseek":
@@ -240,6 +224,7 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                 provider=OpenAIProvider(
                     base_url=settings.deepseek_base_url,
                     api_key=settings.deepseek_api_key,
+                    http_client=get_shared_http_client(),
                 ),
             )
         case "gateway":
@@ -262,6 +247,16 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                 provider=OpenAIProvider(
                     base_url=settings.bailian_base_url,
                     api_key=settings.bailian_api_key,
+                    http_client=get_shared_http_client(),
+                ),
+            )
+        case "openai":
+            # OpenAI official API
+            return OpenAIChatModel(
+                model_id,
+                provider=OpenAIProvider(
+                    api_key=settings.openai_api_key,
+                    http_client=get_shared_http_client(),
                 ),
             )
         case "google":
@@ -276,6 +271,18 @@ def resolve_model(spec: str, settings: Settings) -> Model:
             )
         case _:
             raise ValueError(f"Unknown provider: {provider}")
+
+
+# 网关逐模型参数覆盖（2026-08-18 网关实测，probe_models.py）：
+#   qwen3.5-ocr：max_tokens 上限 16384（thinking_budget 参数也受限 → 不给思考值）
+# 思考模式模型（qwen3.7-max-2026-05-17 / qwen3.7-max-preview / deepseek-v4-flash-0731）
+# 已从池中移除：它们思考无法关闭，而 pydantic-ai 强制工具调用发送
+# tool_choice='required' 与思考模式冲突（400），无参数路径可解 → 不入池，overrides 不保留。
+# 命中整体替换 gateway-bailian 默认编码；未命中走默认（RE=none + 128000）。
+GATEWAY_MODEL_OVERRIDES: dict[str, ModelSettings] = {
+    "gateway-bailian/qwen3.5-ocr": OpenAIChatModelSettings(
+        max_tokens=16_384, openai_reasoning_effort="none"),
+}
 
 
 def resolve_model_settings(spec: str) -> ModelSettings:
@@ -309,11 +316,15 @@ def resolve_model_settings(spec: str) -> ModelSettings:
         case "gateway-bailian":
             # 平台网关代理的百炼与直连百炼行为一致：qwen3.x 默认思考模式与
             # tool_choice='required' 冲突，需用 reasoning_effort='none' 关闭思考。
+            # 逐模型覆盖（2026-08-18 网关实测）：命中 GATEWAY_MODEL_OVERRIDES
+            # 的模型整体替换此默认编码。
+            if spec in GATEWAY_MODEL_OVERRIDES:
+                return GATEWAY_MODEL_OVERRIDES[spec]
             return OpenAIChatModelSettings(
                 max_tokens=128_000,
                 openai_reasoning_effort="none",
             )
-        case "azure" | "zen":
+        case "azure" | "zen" | "openai":
             # Azure/Zen use OpenAI chat completions — server-side
             # prompt caching is automatic, no explicit config needed. Set max_tokens
             # to avoid reserving the full context window.
